@@ -1,0 +1,61 @@
+# pdf2md 依赖清单
+#
+# 内置路径（--backend builtin / auto 的兜底）：Python 第三方包无。
+# 全部实现只用标准库：argparse / os / re / shutil / statistics / struct /
+# subprocess / sys / tempfile / zlib / json / hashlib / unicodedata / importlib。
+# 故本文件对内置路径没有 pip 需求。
+#
+# 需要 Python 3.11+（开发与验证环境：Python 3.11.4，命令 `py -3.11`）。
+# 注意 Windows 的 `py` 会读脚本 shebang 选解释器，依赖不在默认解释器里时请显式
+# `py -3.11 convert.py`（见 PITFALLS 坑 19）。
+#
+# ---------------------------------------------------------------- 可选后端
+#
+# 2026-11-21 合并自上游知识库管线的三条路径，各自需要额外的能力，缺了会明确报错：
+#
+# A) --backend structured（结构化抽取 + 配图）
+#    - pymupdf           页面渲染 / 内嵌图抽取 / 页数统计（必需）
+#    - pymupdf4llm       标题/表格/列表结构化 md（主抽取器；必需）
+#    - pypdf             仅在 pymupdf4llm 抽出空正文时兜底（可选，缺了不降级）
+#      python -m pip install pymupdf pymupdf4llm pypdf
+#    - 实测：Python 3.11.4 + pymupdf/pymupdf4llm 可用；pypdf 未装也能跑，只是不兜底。
+#
+# B) --backend paddle / --ocr-fallback（页级 OCR）
+#    - 另装 PaddleOCR-json（不是 pip 包），用环境变量指过去：
+#        $env:PDF2MD_OCR_EXE = "<引擎目录>\PaddleOCR-json.exe"
+#        # 或 $env:PDF2MD_OCR_DIR = "<引擎目录>"
+#        # 兼容历史变量名：KB_OCR_ENGINE_EXE / KB_OCR_ENGINE_DIR 也认
+#    - 引擎要求：进程 cwd 是其自身目录、图片路径必须是 ASCII、
+#      启动后会打印 "OCR init completed."（脚本会等这行）。
+#    - 渲染页仍需 pymupdf（见 A）。
+#    - 可选 $env:PDF2MD_OCR_DPI（默认 200）。
+#
+# C) 质量门禁（quality.py）：只用标准库（unicodedata / re），无额外依赖。
+#
+# ---------------------------------------------------------------- 外部程序（内置路径）
+#
+# 程序本身的两种形态各需一份外部能力，都**不随仓库分发**，缺了会明确报错：
+#
+# 1) 截图型 PDF（整页长图、无文字层）→ Windows OCR
+#    - 需要 Windows 自带的 Windows PowerShell 5.1（`powershell.exe`）。
+#    - 注意：**pwsh 7 不行**。WinRT 投影类型在 pwsh 7 里加载失败，
+#      实测报「找不到类型 [Windows.Media.Ocr.OcrEngine, ...]」。
+#    - 需要装中文 OCR 语言包。实测本机 AvailableRecognizerLanguages 只有
+#      `zh-Hans-CN`；没装语言包时 `TryCreateFromUserProfileLanguages()` 返回 $null。
+#    - OcrEngine.MaxImageDimension = 10000 px，整页长图（最长的实测 20000 px）
+#      必须切片，脚本已按 step=1800 / overlap=60 切成多片。
+#
+# 2) 文字层 PDF → 外部 poppler 的 pdftotext
+#    - 探测顺序：环境变量 PDFTOTEXT → PATH 上的 pdftotext → 常见安装路径
+#      （C:\Program Files\Calibre2\app\bin、C:\Program Files\poppler\Library\bin、C:\poppler\bin）。
+#    - **找到之后会真跑一次 `<exe> -v` 验证**：本机 PATH 上排第一的
+#      `<MiKTeX 安装目录>\pdftotext.EXE` 一跑就崩
+#      （log4cxx setFile 失败、exit -1073740791），只看「文件存在」会踩坑。
+#    - 实测可用的那份是 Calibre 自带的：`pdftotext version 25.11.0`。
+#    - 用 `PDFTOTEXT` 环境变量可显式指定：
+#        $env:PDFTOTEXT = "C:\Program Files\Calibre2\app\bin\pdftotext.exe"
+#    - 注意 `-v` 通过 ≠ 能抽出字：字体缺 ToUnicode/语言包时它会「退出码 0 + 零输出」，
+#      所以写盘前还有三态质量门禁（见 PITFALLS 坑 25）。
+#
+# 两者都缺时：--check 会明说缺什么，--apply 退出码 1 并给出原因，绝不产出空 MD。
+

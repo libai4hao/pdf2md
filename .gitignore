@@ -1,0 +1,19 @@
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+
+# 转换产物 / 备份 / 缓存
+*.md.bak
+*.md.ocr.bak
+*.ocr.txt
+*.ocr.txt.meta.json
+*.images/
+
+# 本机复核记录（含个人路径与语料统计，不随仓库发布）
+CODE-REVIEW-2026-11-21.md
+
+# 编辑器 / 系统
+.DS_Store
+.idea/
+.vscode/
