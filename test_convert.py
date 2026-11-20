@@ -335,11 +335,21 @@ class FindPdftotextTest(unittest.TestCase):
         self.assertNotEqual(convert.find_pdftotext(), missing)
 
     def test_broken_exe_on_path_is_skipped(self):
-        """PATH 上有个跑不起来的 pdftotext（实测 MiKTeX 那份），必须跳过继续找。"""
-        good = r"C:\Program Files\Calibre2\app\bin\pdftotext.exe"
-        convert.shutil.which = lambda name: r"C:\tools\MiKTeX\miktex\bin\x64\pdftotext.EXE"
-        convert.pdftotext_works = lambda exe: exe == good
-        self.assertEqual(convert.find_pdftotext(), good)
+        """PATH 上有个跑不起来的 pdftotext，必须跳过继续找（fixture 与平台无关）。"""
+        with tempfile.TemporaryDirectory() as d:
+            bad = os.path.join(d, "pdftotext-broken.exe")
+            good = os.path.join(d, "pdftotext-good.exe")
+            for path in (bad, good):
+                with open(path, "wb") as fh:
+                    fh.write(b"not really an exe")
+            real_cands = convert.PDFTOTEXT_CANDIDATES
+            convert.PDFTOTEXT_CANDIDATES = [bad, good]
+            convert.shutil.which = lambda name: bad
+            convert.pdftotext_works = lambda exe: exe == good
+            try:
+                self.assertEqual(convert.find_pdftotext(), good)
+            finally:
+                convert.PDFTOTEXT_CANDIDATES = real_cands
 
     def test_all_broken_returns_none(self):
         convert.shutil.which = lambda name: "/fake/pdftotext"
