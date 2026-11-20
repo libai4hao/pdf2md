@@ -970,5 +970,47 @@ class QuestionHeadingTest(unittest.TestCase):
         self.assertFalse(any(p.startswith("## ") for p in r))
 
 
+class PackagingTest(unittest.TestCase):
+    """pyproject 与代码的版本/入口点不许漂移：发布流水线按 tag 发版，漂移会打出错版本。"""
+
+    def setUp(self):
+        self.root = os.path.dirname(os.path.abspath(__file__))
+
+    def _pyproject(self):
+        try:
+            import tomllib
+        except ImportError:                                   # Python < 3.11
+            self.skipTest("需要 3.11+ 的 tomllib")
+        with open(os.path.join(self.root, "pyproject.toml"), "rb") as fh:
+            return tomllib.load(fh)
+
+    def test_version_single_source(self):
+        data = self._pyproject()
+        self.assertEqual(
+            data["tool"]["setuptools"]["dynamic"]["version"]["attr"],
+            "convert.__version__",
+            "版本号只允许来自 convert.__version__，避免 tag / pyproject / 代码三处漂移",
+        )
+
+    def test_entry_points_point_at_real_functions(self):
+        import importlib
+        data = self._pyproject()
+        scripts = data["project"]["scripts"]
+        self.assertEqual(scripts["pdf2md"], "convert:main")
+        self.assertEqual(scripts["pdf2md-batch"], "batch_convert:main")
+        self.assertEqual(scripts["pdf2md-merge"], "ocr_merge:main")
+        for target in scripts.values():
+            mod_name, func_name = target.split(":")
+            self.assertTrue(os.path.isfile(os.path.join(self.root, mod_name + ".py")),
+                            target)
+            self.assertTrue(callable(getattr(importlib.import_module(mod_name),
+                                             func_name, None)), target)
+
+    def test_changelog_mentions_current_version(self):
+        with open(os.path.join(self.root, "CHANGELOG.md"), encoding="utf-8") as fh:
+            self.assertIn("## [%s]" % convert.__version__, fh.read(),
+                          "发版前要先在 CHANGELOG 顶部加一节")
+
+
 if __name__ == "__main__":
     unittest.main()

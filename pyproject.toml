@@ -1,0 +1,64 @@
+[build-system]
+requires = ["setuptools>=77"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "pdf2md"
+dynamic = ["version"]
+description = "PDF → Markdown for Chinese PDFs: stdlib screenshot OCR + pdftotext, optional pymupdf4llm structured extraction, PaddleOCR-json page OCR, 3-state quality gate."
+readme = "README.md"
+requires-python = ">=3.9"
+license = "MIT"
+license-files = ["LICENSE"]
+authors = [{ name = "libai4hao" }]
+keywords = [
+  "pdf",
+  "markdown",
+  "ocr",
+  "pymupdf",
+  "paddleocr",
+  "chinese",
+  "document-conversion",
+  "cli",
+]
+classifiers = [
+  "Environment :: Console",
+  "Intended Audience :: Developers",
+  "Natural Language :: Chinese (Simplified)",
+  "Operating System :: OS Independent",
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3 :: Only",
+  "Topic :: Text Processing :: Markup :: Markdown",
+]
+dependencies = []
+
+[project.optional-dependencies]
+structured = ["pymupdf>=1.24", "pymupdf4llm>=0.0.17"]
+pypdf = ["pypdf>=4.0"]
+# 页级 OCR 依赖外部 PaddleOCR-json 程序，没有可 pip 安装的包，见 README
+full = ["pymupdf>=1.24", "pymupdf4llm>=0.0.17", "pypdf>=4.0"]
+
+[project.urls]
+Homepage = "https://github.com/libai4hao/pdf2md"
+Repository = "https://github.com/libai4hao/pdf2md"
+Changelog = "https://github.com/libai4hao/pdf2md/blob/main/CHANGELOG.md"
+Issues = "https://github.com/libai4hao/pdf2md/issues"
+
+[project.scripts]
+pdf2md = "convert:main"
+pdf2md-batch = "batch_convert:main"
+pdf2md-merge = "ocr_merge:main"
+
+[tool.setuptools]
+py-modules = [
+  "convert",
+  "batch_convert",
+  "ocr_merge",
+  "structured",
+  "paddle_ocr",
+  "quality",
+  "fsutil",
+]
+
+[tool.setuptools.dynamic]
+version = { attr = "convert.__version__" }

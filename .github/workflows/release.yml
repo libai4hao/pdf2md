@@ -45,6 +45,11 @@ jobs:
         with:
           fetch-depth: 0
 
+      - name: Set up Python
+        uses: actions/setup-python@v7
+        with:
+          python-version: "3.11"
+
       - name: Resolve tag
         id: meta
         env:
@@ -68,17 +73,31 @@ jobs:
           git archive --format=zip --prefix="pdf2md-${TAG}/" -o "pdf2md-${TAG}.zip" "$TAG"
           sha256sum "pdf2md-${TAG}.zip" > "pdf2md-${TAG}.zip.sha256"
 
+      - name: Build wheel and sdist
+        env:
+          TAG: ${{ steps.meta.outputs.tag }}
+        run: |
+          set -euo pipefail
+          python -m pip install --upgrade build
+          python - <<'PY'
+          import os, sys, convert
+          tag = os.environ["TAG"].lstrip("v")
+          if convert.__version__ != tag:
+              sys.exit("版本不一致：convert.__version__=%s，tag=%s" % (convert.__version__, tag))
+          PY
+          python -m build --outdir dist
+
       - name: Publish GitHub Release
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           TAG: ${{ steps.meta.outputs.tag }}
         run: |
           set -euo pipefail
+          FILES=("pdf2md-${TAG}.zip" "pdf2md-${TAG}.zip.sha256" dist/*.whl dist/*.tar.gz)
           if gh release view "$TAG" >/dev/null 2>&1; then
-            gh release upload "$TAG" "pdf2md-${TAG}.zip" "pdf2md-${TAG}.zip.sha256" --clobber
+            gh release upload "$TAG" "${FILES[@]}" --clobber
           else
-            gh release create "$TAG" \
-              "pdf2md-${TAG}.zip" "pdf2md-${TAG}.zip.sha256" \
+            gh release create "$TAG" "${FILES[@]}" \
               --title "pdf2md ${TAG}" \
               --notes-file CHANGELOG.md
           fi

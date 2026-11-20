@@ -2,6 +2,21 @@
 
 本文件记录所有值得注意的变更。格式参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，版本号遵循 [SemVer](https://semver.org/lang/zh-CN/)。
 
+## [0.1.1] - 2026-11-21
+
+把工具装成命令，而不只是一个要 `py convert.py` 的脚本目录。
+
+### Added
+
+- `pyproject.toml`：`pipx install .`（推荐，隔离环境）或 `pip install .` 之后可直接用 `pdf2md` / `pdf2md-batch` / `pdf2md-merge` 三个命令；版本号唯一来源是 `convert.__version__`（setuptools 动态读取，不会与 tag 漂移）。
+- 可选依赖组：`structured`（pymupdf + pymupdf4llm）、`pypdf`（空正文兜底）、`full`（两者全装）。核心路径仍是零依赖。
+- `MANIFEST.in`：sdist 里带上 README / CHANGELOG / PITFALLS / LICENSE / requirements。
+- 发布流水线新增 `python -m build`，把 wheel 与 sdist 一并附到 Release（不再只有源码 zip）。
+
+### Changed
+
+- `__version__` 从 0.1.0 升到 0.1.1。
+
 ## [0.1.0] - 2026-11-21
 
 首个公开版本：把「一批中文 PDF 转 Markdown」的一次性处理，沉淀成可复跑、可验证的 CLI 工具。
@@ -28,4 +43,5 @@
 - 配图在正文抽取成功后才落盘，失败不留孤立 PNG。
 - 批量入口的空产物判定改用门禁可见字符数，不再用文件字节数；日志写失败不再拖崩整批。
 
+[0.1.1]: https://github.com/libai4hao/pdf2md/releases/tag/v0.1.1
 [0.1.0]: https://github.com/libai4hao/pdf2md/releases/tag/v0.1.0

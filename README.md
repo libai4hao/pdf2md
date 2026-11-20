@@ -34,6 +34,17 @@
 
 环境：Python 3.11（`py`），内置路径无 `pip install`（见 [requirements.txt](requirements.txt)）。各形态所需外部能力：截图型与伪文字层兜底都要 Windows PowerShell 5.1 + 中文 OCR 语言包；文字层要 poppler 的 `pdftotext`；伪文字层兜底还要 `pdftoppm`（一般随 `pdftotext` 一起装）。可选后端另需 `pymupdf` / `pymupdf4llm`（结构化）、`PaddleOCR-json` 引擎（页级 OCR），见第七节。
 
+**装成命令**（可选，`pyproject.toml` 已就绪）：
+
+```pwsh
+pipx install .                  # 推荐：隔离环境，不污染站点包
+pip install .                   # 或装进当前环境
+pip install ".[structured]"     # 需要结构化后端时（pymupdf + pymupdf4llm），pypdf 兜底用 ".[pypdf]"
+pdf2md --version                # pdf2md 0.1.1
+```
+
+装好后 `pdf2md` / `pdf2md-batch` / `pdf2md-merge` 分别等价于本节的 `convert.py` / `batch_convert.py` / `ocr_merge.py`；下面的示例仍用仓库内脚本写法，两种用法等价。
+
 > **解释器要钉住**：本仓库脚本首行是 `#!/usr/bin/env python`，Windows 的 `py` 启动器会读 shebang 选解释器。如果 PATH 上的 `python` 不是装了 `pymupdf4llm` 的那个，`py convert.py --check` 会显示「结构化抽取：无」——用 `py -3.11 convert.py ...` 或 `py -m convert ...` 钉版本（见 [PITFALLS 坑 19](PITFALLS.md)）。
 
 ```pwsh
