@@ -1,5 +1,9 @@
 # pdf2md：PDF → 标准 Markdown（截图 OCR / 文字层 / 结构化抽取 / 页级 OCR）
 
+[![release](https://github.com/libai4hao/pdf2md/actions/workflows/release.yml/badge.svg)](https://github.com/libai4hao/pdf2md/actions/workflows/release.yml)
+[![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+[![Changelog](https://img.shields.io/badge/changelog-v0.1.0-informational)](CHANGELOG.md)
+
 `pdf2md` 把中文 PDF 转成干净的 Markdown。核心路径只用 Python 标准库：截图型 PDF 走 WinRT OCR、文字层 PDF 走外部 `pdftotext`；可选后端补上 `pymupdf4llm` 结构化抽取（标题/表格/配图）与 PaddleOCR-json 页级 OCR，全程带三态质量门禁。
 
 把一批 11 份 PDF 转 Markdown 的**一次性处理**，沉淀成可复跑的脚本与可核对的经验。内置路径（截图 OCR + pdftotext）仍然是 Python 侧零第三方依赖，只用标准库；2026-11-21 起把上游知识库管线的 PDF→MD 能力（pymupdf4llm 结构化抽取、PaddleOCR-json 页级 OCR、三态质量门禁、OCR 侧车与合并）合并进来，作为**可选后端**（见第七节）。

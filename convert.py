@@ -33,6 +33,8 @@ import zlib
 import fsutil
 import quality
 
+__version__ = "0.1.0"
+
 # ---------------------------------------------------------------- 常量
 
 # CJK 表意文字 + 中日韩标点 + 全角符号
@@ -1168,6 +1170,7 @@ def main(argv=None):
         description="PDF → 标准 Markdown（截图 OCR / 文字层 / 结构化抽取 / 页级 OCR）"
     )
     parser.add_argument("path", help="PDF 文件路径")
+    parser.add_argument("--version", action="version", version="pdf2md " + __version__)
     parser.add_argument("--check", action="store_true", help="只读预检，不写盘")
     parser.add_argument("--apply", action="store_true", help="写 <同名>.md")
     parser.add_argument("--no-backup", action="store_true", help="不备份已有 .md")
