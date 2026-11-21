@@ -123,11 +123,10 @@ def main(argv=None):
             continue
 
         gate = report["gate"]
-        by_gate[gate["state"]] += 1
-        by_backend[report["backend"]] = by_backend.get(report["backend"], 0) + 1
         if report["ocr_txt"] and not report["resumed"]:
             ocr_runs += 1
         if args.strict and gate["state"] != "pass":
+            convert.cleanup_images(report)
             failed.append((os.path.basename(p),
                            "门禁%s：%s" % (GATE_LABEL[gate["state"]], gate["reason"])))
             log_row(args.log, dict(pdf=p, ok=False, gate=gate, backend=report["backend"]))
@@ -142,6 +141,9 @@ def main(argv=None):
             log_row(args.log, dict(pdf=p, md=out, ok=False, err=msg[:200],
                                   backend=report["backend"], gate=gate))
             continue
+        # 门禁/后端分布只统计真正落盘成功的件，写盘失败不进分布
+        by_gate[gate["state"]] += 1
+        by_backend[report["backend"]] = by_backend.get(report["backend"], 0) + 1
         if gate["chars"] < convert.quality.MIN_CHARS:
             short += 1
         else:

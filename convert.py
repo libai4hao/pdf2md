@@ -931,7 +931,10 @@ def _structured_body(path, extractor="pymupdf4llm", images_root=None, write_imag
     return dict(body=res["md"], shape="结构化(" + res["extractor"] + ")",
                 pages=res["pages"], imgs_kept=res["imgs_kept"],
                 imgs_skipped=res["imgs_skipped"], image_section=structured.image_section(
-                    res["images"], images_rel), ocr_txt=None, extractor=res["extractor"])
+                    res["images"], images_rel), ocr_txt=None, extractor=res["extractor"],
+                images_written=res.get("images_written", []),
+                images_dir=res.get("images_dir"),
+                images_dir_created=res.get("images_dir_created", False))
 
 
 def _paddle_body(path, page_marks=False):
@@ -973,7 +976,8 @@ def convert_file(path, backend="auto", extractor="pymupdf4llm",
     title = os.path.splitext(os.path.basename(path))[0]
     source = os.path.basename(path)
     extra = dict(pages=None, imgs_kept=0, imgs_skipped=0, ocr_txt=None,
-                 image_section="", extractor=None, resumed=None)
+                 image_section="", extractor=None, resumed=None,
+                 images_written=[], images_dir=None, images_dir_created=False)
 
     if chosen == "builtin":
         b = _builtin_body(path, raw, kind)
@@ -986,7 +990,10 @@ def convert_file(path, backend="auto", extractor="pymupdf4llm",
         md = _wrap(title, b["body"], shape, source, STRUCTURED_NOTE)
         extra.update(pages=b["pages"], imgs_kept=b["imgs_kept"],
                      imgs_skipped=b["imgs_skipped"],
-                     image_section=b["image_section"], extractor=b["extractor"])
+                     image_section=b["image_section"], extractor=b["extractor"],
+                     images_written=b.get("images_written", []),
+                     images_dir=b.get("images_dir"),
+                     images_dir_created=b.get("images_dir_created", False))
     else:                                                 # paddle
         if not paddle_available():
             raise PdfError("--backend paddle 需要 PaddleOCR-json：设置 PDF2MD_OCR_EXE "
@@ -1024,7 +1031,28 @@ def convert_file(path, backend="auto", extractor="pymupdf4llm",
                 imgs_kept=extra.get("imgs_kept", 0),
                 imgs_skipped=extra.get("imgs_skipped", 0),
                 ocr_txt=extra.get("ocr_txt"), resumed=extra.get("resumed"),
+                images_written=extra.get("images_written", []),
+                images_dir=extra.get("images_dir"),
+                images_dir_created=extra.get("images_dir_created", False),
                 chars=len(md), kind=kind)
+
+
+def cleanup_images(report):
+    """门禁拦下正文时，删掉**本次新建**的配图；已存在的同 hash 文件与目录一律保留。
+
+    只依据 report 里 `images_written` / `images_dir_created`，不做目录扫描，
+    避免误删用户原有的 `*.images/` 内容。
+    """
+    for path in report.get("images_written") or []:
+        try:
+            os.unlink(path)
+        except OSError:
+            pass
+    if report.get("images_dir_created") and report.get("images_dir"):
+        try:
+            os.rmdir(report["images_dir"])         # 只在空目录时成功
+        except OSError:
+            pass
 
 
 def _report_gate(gate, stream=None):
@@ -1039,12 +1067,14 @@ def process_file(path, apply=False, backup=True, strict=False, **opts):
     兼容旧签名：`process_file(path, apply, backup)` 仍是原来的行为
     （auto 路由；文字层在装了 pymupdf4llm 的机器上会走结构化）。
     """
+    opts.setdefault("write_images", apply)        # dry-run 不落配图，保持“零写盘”
     report = convert_file(path, **opts)
     md = report["md"]
     gate = report["gate"]
     if gate["state"] != "pass":
         _report_gate(gate)
     if strict and gate["state"] != "pass":
+        cleanup_images(report)
         raise PdfError("质量门禁未通过（%s）：%s" % (gate["state"], gate["reason"]))
 
     if apply:

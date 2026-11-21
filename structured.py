@@ -151,12 +151,13 @@ def image_section(refs, images_rel, total=None):
 
 
 def _collect_images(doc, images_dir, stem, write=True):
-    """抽图 → (refs, kept, skipped)。refs = [(filename, page_no)]。
+    """抽图 → (refs, kept, skipped, written)。refs = [(filename, page_no)]。
 
     `write=False` 只做统计、不落盘（`--check` 用：预检不能往语料目录里塞文件）。
+    `written` 只记**本次新建**的绝对路径（同 hash 已存在时不算），供 strict 失败回收。
     """
     if not images_dir:
-        return [], 0, 0
+        return [], 0, 0, []
     pymupdf = _pymupdf()
     page_counts = {}
     kept = []
@@ -178,26 +179,35 @@ def _collect_images(doc, images_dir, stem, write=True):
     decorative = decorative_hashes(page_counts, len(doc))
     saved = plan_saved(kept, decorative)
     refs = []
+    written = []
     for h, pno, data in saved:
         fn = "%s_%s.png" % (stem, h)
         if write:
-            fsutil.atomic_write_bytes(os.path.join(str(images_dir), fn), data)
+            target = os.path.join(str(images_dir), fn)
+            if not os.path.exists(target):
+                written.append(target)
+            fsutil.atomic_write_bytes(target, data)
         refs.append((fn, pno))
-    return refs, len(saved), len(kept) - len(saved)
+    return refs, len(saved), len(kept) - len(saved), written
 
 
 def _md_via_pypdf(path):
-    try:
-        from pypdf import PdfReader
-    except ImportError as exc:
-        raise StructuredError("pypdf 兜底需要 pypdf：python -m pip install pypdf") from exc
     import logging
-    logging.getLogger("pypdf").setLevel(logging.CRITICAL)
+    logger = logging.getLogger("pypdf")
+    old_level = logger.level
+    logger.setLevel(logging.CRITICAL)          # pypdf 的告警会污染 stderr
     try:
-        reader = PdfReader(str(path))
-        return "\n\n".join((p.extract_text() or "") for p in reader.pages)
-    except Exception as exc:                              # noqa: BLE001
-        raise StructuredError("pypdf 抽取失败：%s" % exc) from exc
+        try:
+            from pypdf import PdfReader
+        except ImportError as exc:
+            raise StructuredError("pypdf 兜底需要 pypdf：python -m pip install pypdf") from exc
+        try:
+            reader = PdfReader(str(path))
+            return "\n\n".join((p.extract_text() or "") for p in reader.pages)
+        except Exception as exc:                          # noqa: BLE001
+            raise StructuredError("pypdf 抽取失败：%s" % exc) from exc
+    finally:
+        logger.setLevel(old_level)                 # 不把库内全局副作用留给调用方
 
 
 def _md_via_pymupdf4llm(doc):
@@ -291,8 +301,10 @@ def extract(path, images_dir=None, images_rel="images", stem=None,
                 else:
                     md = _md_via_pypdf(path)
                 # 正文抽成功之后才落图：抽取失败不留孤立图片文件
-                refs, kept, skipped = _collect_images(
+                dir_existed = bool(images_dir) and os.path.isdir(str(images_dir))
+                refs, kept, skipped, written = _collect_images(
                     doc, images_dir, stem, write=write_images)
+                dir_created = bool(images_dir) and write_images and not dir_existed
         finally:
             doc.close()
     finally:
@@ -302,7 +314,10 @@ def extract(path, images_dir=None, images_rel="images", stem=None,
     if section:
         md = (md + "\n" + section) if md else section.lstrip("\n")
     return dict(md=md, pages=pages, extractor=used,
-                imgs_kept=kept, imgs_skipped=skipped, images=refs)
+                imgs_kept=kept, imgs_skipped=skipped, images=refs,
+                images_written=written,
+                images_dir=(str(images_dir) if images_dir else None),
+                images_dir_created=bool(dir_created and os.path.isdir(str(images_dir))))
 
 
 def looks_structured(md):

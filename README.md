@@ -1,5 +1,6 @@
 # pdf2md：PDF → 标准 Markdown（截图 OCR / 文字层 / 结构化抽取 / 页级 OCR）
 
+[![ci](https://github.com/libai4hao/pdf2md/actions/workflows/ci.yml/badge.svg)](https://github.com/libai4hao/pdf2md/actions/workflows/ci.yml)
 [![release](https://github.com/libai4hao/pdf2md/actions/workflows/release.yml/badge.svg)](https://github.com/libai4hao/pdf2md/actions/workflows/release.yml)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 [![Changelog](https://img.shields.io/badge/changelog-v0.1.1-informational)](CHANGELOG.md)
@@ -81,7 +82,7 @@ py -3.11 convert.py "<路径>.pdf" --apply --ocr-fallback            # 门禁不
 | `--apply --no-backup` | 写出但不备份 | 是 |
 | `--backend auto\|builtin\|structured\|paddle` | 选抽取后端；`auto`：文字层优先结构化，截图型仍走内置 | 随 `--apply` |
 | `--extractor pymupdf4llm\|pypdf` | 结构化路径的抽取器，默认 `pymupdf4llm` | 随 `--apply` |
-| `--strict` | 质量门禁非 `pass` 时抛错退出（`1`），不写盘 | 否 |
+| `--strict` | 质量门禁非 `pass` 时抛错退出（`1`），不写正文；结构化路径本次新建的配图会被回收 | 否 |
 | `--ocr-fallback` | 门禁不通过时改用页级 OCR（需配置引擎），结果不比原来差才换 | 随 `--apply` |
 | `--page-marks` | 页级 OCR 正文保留 `===== page n =====` 页标记（默认不写，标记留在 `.ocr.txt`） | 随 `--apply` |
 
@@ -122,10 +123,10 @@ py -3.11 batch_convert.py "<源目录>" --mirror "<输出目录>" --backend stru
 - `--out <DIR>`：产物平铺到该目录；`--mirror <DIR>`：按源相对结构落到该目录（推荐；配图跟着 md 落 `<产物目录>/<stem>.images/`）；
 - `--force`：已有 `.md` 也重转；
 - `--backend` / `--extractor` / `--ocr-fallback` / `--page-marks`：与单份 `convert.py` 同名参数一致；
-- `--strict`：门禁非 `pass` 的件**不写盘**并计入失败；
+- `--strict`：门禁非 `pass` 的件**不写正文**并计入失败；结构化路径会删掉本次新建的配图（同 hash 旧图与既有目录保留）；
 - `--log <FILE>`：每件追加一行 JSONL（pdf / md / backend / shape / pages / chars / imgs_kept / ocr_txt / gate / sec），崩了也能按行排查；写日志失败只警告，不让整批陪葬；
 - 平铺 `--out` 时不同目录的同名 PDF 会撞同一产物：**先写的赢，后者记「产物重名」失败**，不静默覆盖；
-- 末尾打「完成 / 跳过 / 空·过短 / 失败」（空·过短按门禁可见字符数 < 100 判，不再用文件字节数）「门禁 pass/review/fail」「后端分布」「本次新跑页级 OCR 件数」；
+- 末尾打「完成 / 跳过 / 空·过短 / 失败」（空·过短按门禁可见字符数 < 100 判，不再用文件字节数）「门禁 pass/review/fail」「后端分布」「本次新跑页级 OCR 件数」；**门禁/后端分布只统计真正落盘成功的件**，写盘失败不进分布；
 - **退出码**：有失败（异常或 `--strict` 下的非 pass）返回 `1`，否则 `0`；
 - 单份转换仍用 `convert.py --apply`。
 
@@ -162,7 +163,7 @@ py -3.11 batch_convert.py "<源目录>" --mirror "<输出目录>" --backend stru
 | 页级 OCR | `paddle_ocr.run(pdf, ...)` | 逐页 pymupdf 渲染（`PDF2MD_OCR_DPI`，默认 200）→ 常驻引擎一页一请求 → 页标记全文 + sidecar |
 | 续跑校验 | `paddle_ocr.is_complete(pdf)` | 源 sha256 / 总页数 / 已完成页 / 输出 sha256 四道全过才算完成，异常一律 `False`（fail closed） |
 | OCR 合并 | `ocr_merge.merge_file(pdf)` | 旧头部（注记改写为页级 OCR）+ OCR 正文 + 原「## 配图」段；备份 `<md>.ocr.bak` 只在没有备份时创建 |
-| 质量门禁 | `quality.assess(md)` | NFKC → 去 Markdown/页标记 → 可见字符 `<100` fail / 异常字符 `>=2%` fail / CJK `<15%` review / 其余 pass |
+| 质量门禁 | `quality.assess(md)` | NFKC → 去 Markdown/页标记 → 可见字符 `<100` fail / 异常字符 `>=2%` fail / **4+ 连续同字（仅 CJK）`>=30%` review（重复堆叠）** / CJK `<15%` review / 其余 pass |
 
 关键取舍：
 
@@ -190,7 +191,7 @@ py -3.11 batch_convert.py "<源目录>" --mirror "<输出目录>" --backend stru
 - **页级 OCR 的路径限制**：引擎只接受 **ASCII 图片路径**，脚本会把渲染图放进 ASCII 临时目录（系统临时目录含中文时回退到 `%SystemRoot%\Temp`），两者都不可用就直接报错；单页实测 0.8–1.0 s，多页扫描件按页数估算时间。
 - **OCR 很慢**：11 份跑完 `--check` 共 24–26 秒（最长那份 12 片）；batch 时耐心等，别以为卡死。
 - **结构化预检会完整抽一遍**：`--check` 为了给门禁结论必须真抽正文，一份 266 页的样本约 70 秒（`--apply` 同级）；`paddle` 的预检已改成零 OCR，只读 sidecar。配图字节在抽取期间整批驻留内存（121 张 PNG 约几十 MB），图片极多的画册要留意内存。
-- **`--strict` 批量失败可能留下配图**：结构化路径先落图再判门禁，`--strict` 拦下正文时 `<stem>.images/` 已经写入（重跑会复用同 hash 文件名，不产生垃圾堆积，但不是零残留）。要绝对干净就先删掉该目录再重跑。
+- **`--strict` 的配图回收只针对本次新建**：结构化路径先落图再判门禁，`--strict` 拦下正文时会删掉本次写入的图；同 hash 文件若原本已存在则保留，目录只在本次新建且已空时才删。**不是整目录清空**，重跑仍会复用同 hash 文件名。
 - **OCR 全文与 sidecar 不是跨文件事务**：两者各自原子替换，但两次替换之间被强杀会留下不匹配的一对。`is_complete()` 会拒绝半成品并由下次 OCR 重跑；不会自动恢复上一份完整版本。合并前会核对 PDF 指纹，期间源文件变化则拒绝覆盖。
 - **默认只读**：不加 `--apply` 绝不写盘；`--apply` 且目标已存在会自动 `.md.bak` 备份，覆盖前可回滚。**重复 `--apply` 不会用上次产物顶掉首次备份**（`.bak` 已存在就跳过），所以第二次起 `.bak` 始终是最初那份。
 
@@ -200,7 +201,7 @@ py -3.11 batch_convert.py "<源目录>" --mirror "<输出目录>" --backend stru
 
 ```pwsh
 cd pdf2md
-py -3.11 -m unittest -v        # 186 条测试，全绿（OCR 打桩、pymupdf 用例按本机能力跳过）
+py -3.11 -m unittest -v        # 191 条测试，全绿（OCR 打桩、pymupdf 用例按本机能力跳过）
 py -3.11 convert.py "<路径>.pdf" --check
 ```
 
@@ -268,12 +269,13 @@ py -3.11 convert.py "<路径>.pdf" --check
 
 OCR 单测全部打桩（`convert.ocr_pdf = lambda raw: [...]`），因为真 OCR 依赖本机 WinRT 与语言包，进夹具会让测试不可移植。
 
-**合并进来能力的单测（`test_merge.py` 70 条）**，同样只锁可移植的部分，pymupdf / pymupdf4llm 用例按本机能力 `skipUnless`：
+**合并进来能力的单测（`test_merge.py` 75 条）**，同样只锁可移植的部分，pymupdf / pymupdf4llm 用例按本机能力 `skipUnless`：
 
 - `FsutilTest`(5)：原子替换且不残留临时文件、`safe_name` 收敛非法字符/保留名/超长、sha256 与 doc_hash、GB18030 回读、二进制拒读；
-- `QualityTest`(10)：Kangxi 部首经 NFKC 归一后算中文、CJK 扩展 A、过短/乱码/低 CJK/健康四态、**配图语法与页标记不稀释 CJK**、只有页标记时判空、指标字段形状、阈值与上游同值；
+- `QualityTest`(11)：Kangxi 部首经 NFKC 归一后算中文、CJK 扩展 A、过短/乱码/低 CJK/健康四态、**4+ 连续同字堆叠进 review 且偶发叠字不误伤**、**配图语法与页标记不稀释 CJK**、只有页标记时判空、指标字段形状、阈值与上游同值；
 - `StructuredFilterTest`(5)：装饰图阈值 `max(4, 页/3)`（**2 页重复不算装饰**）、同 hash 去重且保留首次页号、配图段格式、抽取器可用性快照；
-- `StructuredExtractTest`(6，需 pymupdf；其中 4 条另需 pymupdf4llm)：**6 页里 4 页重复的装饰图不落盘、正文图留 1 张**、`write_images=False` 时统计照算但**一个文件都不落**、20px 小图在入库前就被过滤、正文 PDF 页数与 CJK 抽取、页数/渲染/越界、缺失 PDF 报错；
+- `StructuredExtractTest`(8，需 pymupdf 与 pymupdf4llm)：**6 页里 4 页重复的装饰图不落盘、正文图留 1 张**、`write_images=False` 时统计照算但**一个文件都不落**、**`process_file` dry-run 不往语料目录写配图**、**第二次抽取只报新增图、不把旧图算成本次新建**、20px 小图在入库前就被过滤、正文 PDF 页数与 CJK 抽取、页数/渲染/越界、缺失 PDF 报错；
+- `StructuredPypdfLoggingTest`(1)：pypdf 抽取失败后 `pypdf` logger 的 level 必须恢复，不把全局降噪留给调用方；
 - `StructuredFallbackQualityTest`(1)：pypdf 候选只在门禁等级提升时被接受；
 - `StructuredFallbackRobustnessTest`(3)：候选抽取失败保留主结果、更优候选被采用、较差/同级候选被丢弃；
 - `PaddleParsingTest`(5)：页范围解析（**`-1` 是负号不是范围**、非法段跳过、超界裁剪）、sidecar 路径、嵌套 `text/score` 收集、**非 ASCII 图片路径必须拒**、页标记默认不写正文；
@@ -284,7 +286,8 @@ OCR 单测全部打桩（`convert.ocr_pdf = lambda raw: [...]`），因为真 OC
 - `OcrMergeTest`(5，需 pymupdf)：合并保留 H1 与「配图」段且把注记改写为页级 OCR、**第二次合并不覆盖首次备份**、dry-run 不写盘不留备份、缺 OCR 全文/OCR 不全都报错；
 - `OcrMergeFailureSafetyTest`(2，需 pymupdf)：真实 PDF 下写盘失败保留原文、合并期间源文件变化拒绝覆盖；
 - `CheckFileReadFailureTest`(1)：`--check` 读盘异常返回 1；
-- `BatchWriteFailureTest`(1)：首件写盘失败不影响后续 PDF；
+- `BatchWriteFailureTest`(1)：首件写盘失败不影响后续 PDF，且**失败件不进门禁/后端分布**；
+- `ImageCleanupTest`(1)：strict 回收只删本次新建图，旧图与既有目录保留；本次新建的空目录才删；
 - `BackendRoutingTest`(5)：未知后端报错、显式后端透传、**auto 的截图型仍走 builtin**、auto 文字层按结构化可用性路由；
 - `ConvertIntegrationTest`(7)：报告带门禁与 shape、短正文照写但结论 fail、**`--strict` 不写盘**、结构化产物经 `_wrap` 拼头部、`--check` 打出后端与门禁行、**`--check --backend structured` 不创建 `.images/`**、`--page-marks` 不影响内置路径；
 - `BatchTargetTest`(1)：`--out` 平铺 / `--mirror` 镜像 / 默认 PDF 旁三种落点。

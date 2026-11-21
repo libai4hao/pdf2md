@@ -7,6 +7,7 @@
 判据（先 NFKC 归一，去掉空白 / Markdown 语法 / 分页标记后算指标）：
     可见字符数 < 100    -> fail    极短产物
     异常字符比 >= 2%    -> fail    真乱码（ړ ୗ ᭗ 这类非中文码位）
+    4+ 连续同字占比 >= 30% -> review 重复堆叠（仅统计 CJK，OCR 复读/装饰字）
     CJK 比例 < 15%      -> review  低中文占比，交给 OCR / 人工裁定
     其余                -> pass
 
@@ -26,6 +27,7 @@ import unicodedata
 MIN_CHARS = 100
 CJK_MIN = 0.15
 BAD_MAX = 0.02
+REPEAT_MAX = 0.30             # 4+ 连续同字覆盖的可见字符占比上限（仅 CJK）
 
 CJK_RANGES = (
     (0x3400, 0x4DBF),    # 扩展 A
@@ -120,6 +122,23 @@ def cjk_ratio(text):
     return cjk_count(vis) / len(vis) if vis else 0.0
 
 
+def repeat_ratio(text):
+    """4+ 连续同字覆盖的可见字符占比（只算 CJK，避免误伤表格里的 0000 / ----）。"""
+    vis = _WS_RE.sub("", text)
+    if not vis:
+        return 0.0
+    covered = 0
+    i, n = 0, len(vis)
+    while i < n:
+        j = i + 1
+        while j < n and vis[j] == vis[i]:
+            j += 1
+        if j - i >= 4 and is_cjk(vis[i]):
+            covered += j - i
+        i = j
+    return covered / n
+
+
 def garbled_ratio(text):
     vis = _WS_RE.sub("", text)
     return sum(1 for ch in vis if is_garbled(ch)) / len(vis) if vis else 0.0
@@ -164,33 +183,37 @@ def metrics(raw):
     vis = visible_chars(text)
     fixed = sum(1 for a, b in zip(raw, norm) if a != b) + abs(len(raw) - len(norm))
     if vis == 0:
-        return dict(chars=0, cjk=0.0, latin=0.0, bad=1.0, fixed=fixed)
+        return dict(chars=0, cjk=0.0, latin=0.0, bad=1.0, repeat=0.0, fixed=fixed)
     clean = _WS_RE.sub("", text)
     n = len(clean)
     cjk = sum(1 for c in clean if is_cjk(c))
     latin = sum(1 for c in clean if ord(c) < 0x80 and c.isalpha())
     bad = sum(1 for c in clean if is_bad_char(c))
-    return dict(chars=n, cjk=cjk / n, latin=latin / n, bad=bad / n, fixed=fixed)
+    return dict(chars=n, cjk=cjk / n, latin=latin / n, bad=bad / n,
+                repeat=repeat_ratio(text), fixed=fixed)
 
 
 def judge(m):
-    """三态判定：fail（真乱码/过短）→ review（低 CJK 灰区）→ pass。"""
+    """三态判定：fail（真乱码/过短）→ review（重复堆叠/低 CJK 灰区）→ pass。"""
     if m["chars"] < MIN_CHARS:
         return "fail", "产物过短(%d字符)" % m["chars"]
     if m["bad"] >= BAD_MAX:
         return "fail", "乱码(异常字符%.1f%%)" % (m["bad"] * 100)
+    if m.get("repeat", 0.0) >= REPEAT_MAX:
+        return "review", "重复堆叠(连续同字%.1f%%) 需裁定" % (m["repeat"] * 100)
     if m["cjk"] < CJK_MIN:
         return "review", "低CJK(%.1f%%) 需裁定" % (m["cjk"] * 100)
     return "pass", ""
 
 
 def assess(md):
-    """一段 md → 三态结论。返回 {state, reason, chars, cjk, latin, bad, fixed}。"""
+    """一段 md → 三态结论。返回 {state, reason, chars, cjk, latin, bad, repeat, fixed}。"""
     m = metrics(md)
     state, reason = judge(m)
     return dict(state=state, reason=reason, chars=m["chars"],
                 cjk=round(m["cjk"], 4), latin=round(m["latin"], 4),
-                bad=round(m["bad"], 4), fixed=m["fixed"])
+                bad=round(m["bad"], 4), repeat=round(m["repeat"], 4),
+                fixed=m["fixed"])
 
 
 def has_page_marks(md):
@@ -199,4 +222,5 @@ def has_page_marks(md):
 
 def thresholds():
     """阈值快照，报告里带上，避免数字漂移后无法解释历史结论。"""
-    return dict(min_chars=MIN_CHARS, cjk_min=CJK_MIN, bad_max=BAD_MAX, nfkc=True)
+    return dict(min_chars=MIN_CHARS, cjk_min=CJK_MIN, bad_max=BAD_MAX,
+                repeat_max=REPEAT_MAX, nfkc=True)

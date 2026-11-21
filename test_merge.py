@@ -148,6 +148,15 @@ class QualityTest(unittest.TestCase):
         state, _ = quality.judge(quality.metrics(text))
         self.assertEqual(state, "pass")
 
+    def test_repeated_run_is_review(self):
+        """OCR 复读/装饰字：4+ 连续同字堆叠超过 30% 只进 review，不直接 fail。"""
+        state, why = quality.judge(quality.metrics("啊" * 120))
+        self.assertEqual(state, "review")
+        self.assertIn("重复堆叠", why)
+        # 偶发 4 连不算：不能把正常正文里的叠字误判成复读
+        text = ("这是一段正常的中文正文。" * 10) + "啊啊啊啊"
+        self.assertEqual(quality.judge(quality.metrics(text))[0], "pass")
+
     def test_markdown_and_page_marks_ignored(self):
         """配图语法、表格线、页标记都不能稀释 CJK 占比。"""
         text = ("# 标题\n\n===== page 1 =====\n\n| 列一 | 列二 |\n| --- | --- |\n\n"
@@ -162,13 +171,14 @@ class QualityTest(unittest.TestCase):
 
     def test_assess_shape(self):
         report = quality.assess("中文正文。" * 50)
-        for key in ("state", "reason", "chars", "cjk", "latin", "bad", "fixed"):
+        for key in ("state", "reason", "chars", "cjk", "latin", "bad", "fixed", "repeat"):
             self.assertIn(key, report)
 
     def test_thresholds_mirror_upstream(self):
         self.assertEqual(quality.MIN_CHARS, 100)
         self.assertEqual(quality.CJK_MIN, 0.15)
         self.assertEqual(quality.BAD_MAX, 0.02)
+        self.assertEqual(quality.REPEAT_MAX, 0.30)
 
 
 
@@ -264,6 +274,32 @@ class StructuredExtractTest(unittest.TestCase):
                                  stem="画册", write_images=False)
         self.assertEqual(res["imgs_kept"], 1)
         self.assertFalse(os.path.exists(img_dir))
+        self.assertEqual(res["images_written"], [])
+        self.assertFalse(res["images_dir_created"])
+
+    @unittest.skipUnless(HAS_LLM, "需要本机安装 pymupdf4llm")
+    def test_structured_dry_run_writes_no_images(self):
+        """process_file 不落盘时，结构化路径也不能往语料目录塞配图。"""
+        pdf = os.path.join(self.dir, "画册.pdf")
+        make_image_pdf(pdf, pages=6, deco_pages=4, tmp=self.dir)
+        convert.process_file(pdf, apply=False, backend="structured")
+        self.assertFalse(os.path.exists(os.path.join(self.dir, "画册.images")))
+        self.assertFalse(os.path.exists(os.path.join(self.dir, "画册.md")))
+
+    @unittest.skipUnless(HAS_LLM, "需要本机安装 pymupdf4llm")
+    def test_extract_reports_only_new_images(self):
+        """同 hash 图已存在时不算“本次新建”，strict 回收不能删用户旧图。"""
+        pdf = os.path.join(self.dir, "画册.pdf")
+        make_image_pdf(pdf, pages=6, deco_pages=4, tmp=self.dir)
+        img_dir = os.path.join(self.dir, "画册.images")
+        first = structured.extract(pdf, images_dir=img_dir, images_rel="画册.images",
+                                   stem="画册")
+        self.assertEqual(len(first["images_written"]), 1)
+        self.assertTrue(first["images_dir_created"])
+        second = structured.extract(pdf, images_dir=img_dir, images_rel="画册.images",
+                                    stem="画册")
+        self.assertEqual(second["images_written"], [])
+        self.assertFalse(second["images_dir_created"])
 
     @unittest.skipUnless(HAS_LLM, "需要本机安装 pymupdf4llm")
     def test_tiny_image_skipped(self):
@@ -709,6 +745,56 @@ class OcrMergeFailureSafetyTest(unittest.TestCase):
         self.assertIn("合并期间 PDF 发生变化", str(ctx.exception))
 
 
+class StructuredPypdfLoggingTest(unittest.TestCase):
+    def test_logger_level_restored_after_failure(self):
+        """pypdf 的全局降噪不能泄漏给调用方：成功/失败都要恢复原 level。"""
+        import logging
+        logger = logging.getLogger("pypdf")
+        old = logger.level
+        logger.setLevel(logging.WARNING)
+        tmp = tempfile.mkdtemp(prefix="pdf2md_log_")
+        try:
+            with self.assertRaises(structured.StructuredError):
+                structured._md_via_pypdf(os.path.join(tmp, "missing.pdf"))
+            self.assertEqual(logger.level, logging.WARNING)
+        finally:
+            logger.setLevel(old)
+            shutil.rmtree(tmp, ignore_errors=True)
+
+
+class ImageCleanupTest(unittest.TestCase):
+    def test_only_new_files_and_empty_dirs_removed(self):
+        """strict 回收只删本次新建：已有同 hash 图与既有目录必须保留。"""
+        root = tempfile.mkdtemp(prefix="pdf2md_clean_")
+        try:
+            # A：目录本次创建，里面只有新图 → 删图并删空目录
+            a_dir = os.path.join(root, "a.images")
+            os.makedirs(a_dir)
+            a_new = os.path.join(a_dir, "a_1.png")
+            with open(a_new, "wb") as fh:
+                fh.write(b"new")
+            convert.cleanup_images(dict(images_written=[a_new], images_dir=a_dir,
+                                        images_dir_created=True))
+            self.assertFalse(os.path.exists(a_new))
+            self.assertFalse(os.path.exists(a_dir))
+
+            # B：目录本来就有，含旧图 + 新图 → 只删新图，目录与旧图不动
+            b_dir = os.path.join(root, "b.images")
+            os.makedirs(b_dir)
+            keep = os.path.join(b_dir, "old.png")
+            new = os.path.join(b_dir, "new.png")
+            for p in (keep, new):
+                with open(p, "wb") as fh:
+                    fh.write(b"x")
+            convert.cleanup_images(dict(images_written=[new], images_dir=b_dir,
+                                        images_dir_created=False))
+            self.assertTrue(os.path.isfile(keep))
+            self.assertFalse(os.path.exists(new))
+            self.assertTrue(os.path.isdir(b_dir))
+        finally:
+            shutil.rmtree(root, ignore_errors=True)
+
+
 class BatchWriteFailureTest(unittest.TestCase):
     def test_one_output_failure_does_not_stop_later_files(self):
         root = tempfile.mkdtemp(prefix="pdf2md_batch_")
@@ -728,11 +814,17 @@ class BatchWriteFailureTest(unittest.TestCase):
                 return real_write(path, text)
             with mock.patch.object(convert, "convert_file", return_value=report):
                 with mock.patch.object(fsutil, "atomic_write_text", side_effect=fail_first):
-                    code = batch_convert.main([root])
+                    out = io.StringIO()
+                    with contextlib.redirect_stdout(out):
+                        code = batch_convert.main([root])
             self.assertEqual(code, 1)
             self.assertTrue(os.path.isfile(os.path.join(root, "b.md")))
             self.assertFalse(os.path.exists(os.path.join(root, "a.md")))
             self.assertEqual(len(calls), 2)
+            # 写盘失败的那件不能进分布：pass 只算 b，后端也只算 1
+            text = out.getvalue()
+            self.assertIn("门禁 pass 1 / review 0 / fail 0", text)
+            self.assertIn("后端 builtin 1", text)
         finally:
             shutil.rmtree(root, ignore_errors=True)
 

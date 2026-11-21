@@ -12,15 +12,21 @@
 - `--check` 读取文件失败转成稳定错误信息与退出码 1，与 `--apply` 的错误语义一致。
 - OCR 合并前后核对 PDF 指纹，合并期间源文件变化则拒绝覆盖；正式 Markdown 写入失败转成 `MergeError`，写入后校验 hash。
 - 批量转换把输出目录创建、转换与正式 Markdown 写入的 `OSError` 纳入单文件失败，并继续处理后续 PDF。
+- 批量统计的「门禁 pass/review/fail」与「后端分布」改为只在正式 Markdown 落盘成功后计数，写盘失败不再污染分布。
+- pypdf 兜底临时调高 `pypdf` logger 级别后，在 `finally` 恢复原 level，不再把全局降噪副作用留给调用方。
+- 结构化路径 `--strict` 未通过门禁时，回收**本次新建**的配图；已存在的同 hash 图与既有目录保留。`process_file` 不落盘（dry-run）时同步关闭配图写入，不再往语料目录塞图。
 
 ### Changed
 
 - 结构化兜底形态标签：空正文仍为 `pypdf(空正文兜底)`，非空低质量改用 `pypdf(质量兜底)`，老调用方的产物说明保持不变。
+- 质量门禁新增「4+ 连续同字（仅 CJK）占比」判据：`>=30%` 判 `review`（重复堆叠），用于兜住 OCR 复读/装饰字，不升级为 `fail`。
 
 ### Added
 
 - 结构化端到端用例按真实依赖 `pymupdf4llm` 跳过，`pymupdf` 单装时不再误报 ERROR/FAIL。
 - 新增 OCR 启动/管道故障、sidecar 提交回滚、合并写盘失败与源文件变化、批量写盘失败等故障注入用例；用真实单页 PDF 走完整合并前置校验，避免因 sidecar 先失败而误绿。
+- 新增重复堆叠门禁、pypdf logger 恢复、strict 配图回收、dry-run 零配图、批量分布不计失败件等回归用例。
+- 新增 `.github/workflows/ci.yml`：`main` push 与 PR 在 Ubuntu/Windows × Python 3.11/3.13 上安装 `.[full]` 并跑 `python -m unittest`。
 
 ## [0.1.1] - 2026-11-21
 
