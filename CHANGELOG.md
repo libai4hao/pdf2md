@@ -2,6 +2,26 @@
 
 本文件记录所有值得注意的变更。格式参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，版本号遵循 [SemVer](https://semver.org/lang/zh-CN/)。
 
+## [Unreleased]
+
+### Fixed
+
+- OCR 子进程的启动、写 stdin、读 stdout 与退出清理异常统一转成 `OcrError`（保留 `__cause__`）；启动期进程提前退出也会收掉管道，不再留下半开句柄。
+- OCR 全文与 sidecar 提交前保留旧版本快照，提交失败回滚；写入后校验输出 hash 与源 PDF hash；回滚失败不再顶掉原始异常。
+- 结构化抽取不再只兜底空正文：质量门禁未达标时尝试 `pypdf`，只有等级提升才采用；候选抽取失败保留主结果，不把可用产物拖成失败。
+- `--check` 读取文件失败转成稳定错误信息与退出码 1，与 `--apply` 的错误语义一致。
+- OCR 合并前后核对 PDF 指纹，合并期间源文件变化则拒绝覆盖；正式 Markdown 写入失败转成 `MergeError`，写入后校验 hash。
+- 批量转换把输出目录创建、转换与正式 Markdown 写入的 `OSError` 纳入单文件失败，并继续处理后续 PDF。
+
+### Changed
+
+- 结构化兜底形态标签：空正文仍为 `pypdf(空正文兜底)`，非空低质量改用 `pypdf(质量兜底)`，老调用方的产物说明保持不变。
+
+### Added
+
+- 结构化端到端用例按真实依赖 `pymupdf4llm` 跳过，`pymupdf` 单装时不再误报 ERROR/FAIL。
+- 新增 OCR 启动/管道故障、sidecar 提交回滚、合并写盘失败与源文件变化、批量写盘失败等故障注入用例；用真实单页 PDF 走完整合并前置校验，避免因 sidecar 先失败而误绿。
+
 ## [0.1.1] - 2026-11-21
 
 把工具装成命令，而不只是一个要 `py convert.py` 的脚本目录。

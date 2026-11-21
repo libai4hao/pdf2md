@@ -23,6 +23,7 @@ import queue
 import re
 import shutil
 import subprocess
+import sys
 import tempfile
 import threading
 import time
@@ -120,25 +121,37 @@ class PaddleEngine:
         if not self.exe or not os.path.isfile(self.exe):
             raise OcrError("找不到 PaddleOCR-json：设置 PDF2MD_OCR_EXE 或 PDF2MD_OCR_DIR")
         started = time.perf_counter()
-        self.proc = subprocess.Popen(
-            [self.exe], cwd=self.work_dir,
-            stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-            text=True, encoding="utf-8", errors="replace", bufsize=1,
-        )
+        try:
+            self.proc = subprocess.Popen(
+                [self.exe], cwd=self.work_dir,
+                stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                text=True, encoding="utf-8", errors="replace", bufsize=1,
+            )
+        except (OSError, subprocess.SubprocessError) as exc:
+            raise OcrError("无法启动 OCR 引擎：%s" % exc) from exc
         threading.Thread(target=self._pump, daemon=True).start()
         deadline = started + self.startup_timeout
-        while time.perf_counter() < deadline:
-            line = self._next_line(max(0.1, deadline - time.perf_counter()))
-            if line and "OCR init completed" in line:
-                self.init_seconds = round(time.perf_counter() - started, 2)
-                return self
+        try:
+            while time.perf_counter() < deadline:
+                line = self._next_line(max(0.1, deadline - time.perf_counter()))
+                if line and "OCR init completed" in line:
+                    self.init_seconds = round(time.perf_counter() - started, 2)
+                    return self
+        except Exception:
+            # 启动期异常（进程提前退出/读取失败）也要收尾，不能把半开的管道留给调用方
+            self.__exit__(None, None, None)
+            raise
         self.__exit__(None, None, None)
         raise OcrError("引擎启动超时：未见 'OCR init completed.'（%s）" % self.exe)
 
     def _pump(self):
-        for line in self.proc.stdout:
-            self._q.put(line)
-        self._q.put(None)
+        try:
+            for line in self.proc.stdout:
+                self._q.put(line)
+        except (OSError, ValueError) as exc:
+            self._q.put(exc)
+        finally:
+            self._q.put(None)
 
     def _next_line(self, timeout):
         try:
@@ -147,6 +160,8 @@ class PaddleEngine:
             return None
         if item is None:
             raise OcrError("OCR 引擎进程已退出")
+        if isinstance(item, BaseException):
+            raise OcrError("读取 OCR 引擎输出失败：%s" % item) from item
         return item.strip()
 
     def ocr(self, image_path):
@@ -155,8 +170,11 @@ class PaddleEngine:
             raise OcrError("图片路径必须是 ASCII（引擎限制）：%s" % path)
         if not self.proc or not self.proc.stdin:
             raise OcrError("引擎未启动")
-        self.proc.stdin.write(json.dumps({"image_path": path}, ensure_ascii=False) + "\n")
-        self.proc.stdin.flush()
+        try:
+            self.proc.stdin.write(json.dumps({"image_path": path}, ensure_ascii=False) + "\n")
+            self.proc.stdin.flush()
+        except (OSError, BrokenPipeError, ValueError) as exc:
+            raise OcrError("向 OCR 引擎发送请求失败：%s" % exc) from exc
         deadline = time.perf_counter() + self.reply_timeout
         while time.perf_counter() < deadline:
             line = self._next_line(max(0.1, deadline - time.perf_counter()))
@@ -181,14 +199,22 @@ class PaddleEngine:
 
     def __exit__(self, *exc):
         if self.proc:
+            proc, self.proc = self.proc, None
             try:
-                if self.proc.stdin:
-                    self.proc.stdin.close()
-                self.proc.terminate()
-                self.proc.wait(timeout=5)
-            except Exception:                             # noqa: BLE001
-                self.proc.kill()
-            self.proc = None
+                if proc.stdin and not proc.stdin.closed:
+                    proc.stdin.close()
+            except (OSError, ValueError):
+                pass
+            try:
+                if proc.poll() is None:
+                    proc.terminate()
+                proc.wait(timeout=5)
+            except (OSError, subprocess.SubprocessError):
+                try:
+                    proc.kill()
+                    proc.wait(timeout=5)
+                except (OSError, subprocess.SubprocessError):
+                    pass
 
 
 def parse_range(text, total):
@@ -261,16 +287,31 @@ def meta_path_for(txt_path):
     return Path(str(txt_path) + ".meta.json")
 
 
+def _restore_pair(txt, old_text, meta_path, old_meta):
+    """把 OCR 全文/sidecar 恢复到提交前状态：原本不存在的单边就清理新建的那一边。"""
+    for path, data in ((txt, old_text), (meta_path, old_meta)):
+        if data is None:
+            try:
+                path.unlink()
+            except OSError:
+                pass
+        else:
+            fsutil.atomic_write_bytes(path, data)
+
+
 def save_text(pdf_path, pages, total_pages, txt_path=None, dpi=None, engine=None):
     """原子落盘 OCR 全文 + sidecar；sidecar 证明「属于这份 PDF、覆盖全页、内容未改」。"""
     txt = text_path_for(pdf_path, txt_path)
     text = render_pages_text(pages, page_marks=True)
-    fsutil.atomic_write_text(txt, text)
     page_numbers = sorted({int(p["page"]) for p in pages})
     all_pages = list(range(1, int(total_pages) + 1))
+    try:
+        source_sha = fsutil.sha256_file(pdf_path)
+    except OSError as exc:
+        raise OcrError("读取源 PDF 失败：%s" % exc) from exc
     meta = dict(
         format_version=META_FORMAT_VERSION,
-        source_sha256=fsutil.sha256_file(pdf_path),
+        source_sha256=source_sha,
         total_pages=int(total_pages),
         completed_pages=page_numbers,
         complete=len(pages) == len(page_numbers) == int(total_pages) and page_numbers == all_pages,
@@ -281,7 +322,31 @@ def save_text(pdf_path, pages, total_pages, txt_path=None, dpi=None, engine=None
         dpi=dpi or default_dpi(),
         engine=engine or engine_exe(),
     )
-    fsutil.atomic_write_text(meta_path_for(txt), json.dumps(meta, ensure_ascii=False, indent=1))
+    meta_path = meta_path_for(txt)
+    # 两个文件无法用单次 rename 组成跨文件事务。先保留旧版本快照；普通异常时回滚，
+    # 进程/机器崩溃发生在两次 replace 之间时，is_complete 的 hash 校验会拒绝半成品，
+    # 下一次 run 自动重跑，而不会把不匹配的文本当作完成结果。
+    old_text = txt.read_bytes() if txt.is_file() else None
+    old_meta = meta_path.read_bytes() if meta_path.is_file() else None
+    try:
+        fsutil.atomic_write_text(txt, text)
+        fsutil.atomic_write_text(meta_path, json.dumps(meta, ensure_ascii=False, indent=1))
+        try:
+            actual_text_sha = fsutil.sha256_file(txt)
+            actual_source_sha = fsutil.sha256_file(pdf_path)
+        except OSError as exc:
+            raise OcrError("OCR 产物写入后读取校验失败：%s" % exc) from exc
+        if actual_text_sha != meta["output_sha256"]:
+            raise OcrError("OCR 全文写入后校验失败：%s" % txt)
+        if actual_source_sha != meta["source_sha256"]:
+            raise OcrError("PDF 在 OCR 结果提交期间发生变化：%s" % pdf_path)
+    except Exception:
+        # 回滚本身失败不能顶掉原始异常，否则调用方看到的是「回滚错误」而非根因
+        try:
+            _restore_pair(txt, old_text, meta_path, old_meta)
+        except Exception as exc:                          # noqa: BLE001
+            print("警告：OCR 产物回滚失败（原异常保留）：%s" % exc, file=sys.stderr)
+        raise
     return txt
 
 

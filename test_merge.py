@@ -12,6 +12,7 @@ import shutil
 import sys
 import tempfile
 import unittest
+from unittest import mock
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
@@ -170,6 +171,36 @@ class QualityTest(unittest.TestCase):
         self.assertEqual(quality.BAD_MAX, 0.02)
 
 
+
+class StructuredFallbackQualityTest(unittest.TestCase):
+    def test_pypdf_fallback_selected_only_when_gate_improves(self):
+        good = "这是一段质量良好的中文正文。" * 20
+        bad = "乱码" * 8
+        self.assertTrue(structured._prefer_pypdf_fallback(bad, good))
+        self.assertFalse(structured._prefer_pypdf_fallback(good, bad))
+        self.assertFalse(structured._prefer_pypdf_fallback(good, good + "补充"))
+
+
+class StructuredFallbackRobustnessTest(unittest.TestCase):
+    """兜底候选自己失败时不能把主结果拖成 StructuredError。"""
+
+    def test_pypdf_failure_keeps_primary(self):
+        bad = "乱码" * 8
+        with mock.patch.object(structured, "_md_via_pypdf",
+                               side_effect=structured.StructuredError("pypdf 坏了")):
+            self.assertIsNone(structured._pypdf_fallback_md("x.pdf", bad))
+
+    def test_better_candidate_is_returned(self):
+        good = "这是一段质量良好的中文正文。" * 20
+        with mock.patch.object(structured, "_md_via_pypdf", return_value=good):
+            self.assertEqual(structured._pypdf_fallback_md("x.pdf", "乱码" * 8), good)
+
+    def test_worse_or_equal_candidate_is_dropped(self):
+        good = "这是一段质量良好的中文正文。" * 20
+        with mock.patch.object(structured, "_md_via_pypdf", return_value="短"):
+            self.assertIsNone(structured._pypdf_fallback_md("x.pdf", good))
+
+
 class StructuredFilterTest(unittest.TestCase):
     """图片筛选是纯逻辑，先把「小图/装饰/去重」锁死，不用真 PDF。"""
 
@@ -208,6 +239,7 @@ class StructuredExtractTest(unittest.TestCase):
     def tearDown(self):
         shutil.rmtree(self.dir, ignore_errors=True)
 
+    @unittest.skipUnless(HAS_LLM, "需要本机安装 pymupdf4llm")
     def test_image_filter_end_to_end(self):
         """装饰图（4/6 页重复）不落盘，正文图保留一张，引用是相对路径。"""
         pdf = os.path.join(self.dir, "画册.pdf")
@@ -222,7 +254,7 @@ class StructuredExtractTest(unittest.TestCase):
         self.assertIn("## 配图（1张）", res["md"])
         self.assertIn("./画册.images/", res["md"])
 
-    @unittest.skipUnless(HAS_PYMUPDF, "需要本机安装 pymupdf")
+    @unittest.skipUnless(HAS_LLM, "需要本机安装 pymupdf4llm")
     def test_write_images_false_leaves_no_files(self):
         """--check 用 write_images=False：统计照算，但一个文件都不落。"""
         pdf = os.path.join(self.dir, "画册.pdf")
@@ -233,6 +265,7 @@ class StructuredExtractTest(unittest.TestCase):
         self.assertEqual(res["imgs_kept"], 1)
         self.assertFalse(os.path.exists(img_dir))
 
+    @unittest.skipUnless(HAS_LLM, "需要本机安装 pymupdf4llm")
     def test_tiny_image_skipped(self):
         import pymupdf
         pdf = os.path.join(self.dir, "小图.pdf")
@@ -516,7 +549,7 @@ class ConvertIntegrationTest(unittest.TestCase):
         self.assertIn("质量门禁：", text)
         self.assertIn("结构化抽取：pymupdf=", text)
 
-    @unittest.skipUnless(HAS_PYMUPDF, "需要本机安装 pymupdf")
+    @unittest.skipUnless(HAS_LLM, "需要本机安装 pymupdf4llm")
     def test_check_structured_does_not_write_images(self):
         """预检只读：结构化后端在 --check 下不得在源目录创建 .images/。"""
         pdf = os.path.join(self.dir, "画册.pdf")
@@ -532,6 +565,176 @@ class ConvertIntegrationTest(unittest.TestCase):
         """内置路径不该受 --page-marks 影响（参数只对页级 OCR 有意义）。"""
         rep = convert.convert_file(self.pdf, backend="builtin", page_marks=True)
         self.assertNotIn("===== page 1 =====", rep["md"])
+
+
+
+class PaddleEngineFailureTest(unittest.TestCase):
+    def test_startup_oserror_is_ocr_error(self):
+        from unittest import mock
+        engine = paddle_ocr.PaddleEngine(exe="fake-engine")
+        with mock.patch.object(paddle_ocr.os.path, "isfile", return_value=True):
+            with mock.patch.object(paddle_ocr.subprocess, "Popen", side_effect=OSError("denied")):
+                with self.assertRaises(paddle_ocr.OcrError) as ctx:
+                    engine.__enter__()
+        self.assertIsInstance(ctx.exception.__cause__, OSError)
+
+    def test_broken_pipe_is_ocr_error(self):
+        from unittest import mock
+        engine = paddle_ocr.PaddleEngine(exe="fake")
+        engine.proc = mock.Mock()
+        engine.proc.stdin.write.side_effect = BrokenPipeError("closed")
+        with self.assertRaises(paddle_ocr.OcrError) as ctx:
+            engine.ocr("ascii.png")
+        self.assertIsInstance(ctx.exception.__cause__, BrokenPipeError)
+
+
+class PaddleStartupCleanupTest(unittest.TestCase):
+    """引擎在 init 完成前退出：抛业务异常的同时必须把进程句柄收掉。"""
+
+    def test_engine_exit_before_init_is_cleaned_up(self):
+        engine = paddle_ocr.PaddleEngine(exe="fake")
+        proc = mock.Mock()
+        proc.stdin = mock.Mock()
+        proc.stdout = iter([])
+        proc.poll.return_value = 0
+        engine._q.put(None)                     # 模拟 _pump 读到 EOF
+        with mock.patch.object(paddle_ocr.os.path, "isfile", return_value=True):
+            with mock.patch.object(paddle_ocr.subprocess, "Popen", return_value=proc):
+                with self.assertRaises(paddle_ocr.OcrError):
+                    engine.__enter__()
+        self.assertIsNone(engine.proc)
+
+
+class OcrSaveTransactionTest(unittest.TestCase):
+    def setUp(self):
+        self.dir = tempfile.mkdtemp(prefix="pdf2md_save_")
+        self.pdf = os.path.join(self.dir, "a.pdf")
+        with open(self.pdf, "wb") as fh:
+            fh.write(b"%PDF-1.4\nsource")
+        self.txt = paddle_ocr.text_path_for(self.pdf)
+
+    def tearDown(self):
+        shutil.rmtree(self.dir, ignore_errors=True)
+
+    def test_failed_metadata_commit_restores_previous_pair(self):
+        pages = [dict(page=1, text="old text", score=0.9, lines=1)]
+        paddle_ocr.save_text(self.pdf, pages, 1)
+        old_text = self.txt.read_bytes()
+        old_meta = paddle_ocr.meta_path_for(self.txt).read_bytes()
+        real_write = fsutil.atomic_write_text
+        calls = []
+        def fail_second(path, text, *args, **kwargs):
+            calls.append(path)
+            if len(calls) == 2:
+                raise OSError("disk full")
+            return real_write(path, text, *args, **kwargs)
+        with mock.patch.object(fsutil, "atomic_write_text", side_effect=fail_second):
+            with self.assertRaises(OSError):
+                paddle_ocr.save_text(self.pdf,
+                    [dict(page=1, text="new text", score=0.8, lines=1)], 1)
+        self.assertEqual(self.txt.read_bytes(), old_text)
+        self.assertEqual(paddle_ocr.meta_path_for(self.txt).read_bytes(), old_meta)
+        self.assertTrue(paddle_ocr.is_complete(self.pdf, 1))
+
+    def test_rollback_failure_keeps_original_error(self):
+        paddle_ocr.save_text(self.pdf, [dict(page=1, text="old text", score=.9, lines=1)], 1)
+        def fail_first(path, text, *args, **kwargs):
+            raise OSError("disk full")
+        with mock.patch.object(fsutil, "atomic_write_text", side_effect=fail_first):
+            with mock.patch.object(fsutil, "atomic_write_bytes", side_effect=OSError("rollback failed")):
+                err = io.StringIO()
+                with contextlib.redirect_stderr(err):
+                    with self.assertRaises(OSError) as ctx:
+                        paddle_ocr.save_text(
+                            self.pdf, [dict(page=1, text="new text", score=.8, lines=1)], 1)
+        self.assertEqual(str(ctx.exception), "disk full")
+        self.assertIn("回滚失败", err.getvalue())
+
+    def test_unreadable_source_is_ocr_error(self):
+        with mock.patch.object(fsutil, "sha256_file", side_effect=OSError("gone")):
+            with self.assertRaises(paddle_ocr.OcrError) as ctx:
+                paddle_ocr.save_text(
+                    self.pdf, [dict(page=1, text="text", score=.9, lines=1)], 1)
+        self.assertIsInstance(ctx.exception.__cause__, OSError)
+
+
+class CheckFileReadFailureTest(unittest.TestCase):
+    def test_read_oserror_returns_cli_error(self):
+        from unittest import mock
+        with mock.patch("os.path.isfile", return_value=True):
+            with mock.patch("builtins.open", side_effect=PermissionError("denied")):
+                err = io.StringIO()
+                with contextlib.redirect_stderr(err):
+                    code = convert.check_file("existing.pdf")
+        self.assertEqual(code, 1)
+        self.assertIn("读取失败", err.getvalue())
+
+
+
+@unittest.skipUnless(HAS_PYMUPDF, "需要本机安装 pymupdf")
+class OcrMergeFailureSafetyTest(unittest.TestCase):
+    """用真实单页 PDF 走完整前置校验，确保失败点确实落在写入/指纹对比上。"""
+
+    def setUp(self):
+        self.dir = tempfile.mkdtemp(prefix="pdf2md_mergefail_")
+        self.pdf = os.path.join(self.dir, "a.pdf")
+        make_text_pdf(self.pdf, lines=("这是一页真实 PDF 正文。",), pages=1)
+        self.md = os.path.splitext(self.pdf)[0] + ".md"
+        with open(self.md, "w", encoding="utf-8") as fh:
+            fh.write("# 原文\n\n原始 Markdown 内容")
+        self.txt = paddle_ocr.text_path_for(self.pdf)
+        paddle_ocr.save_text(self.pdf, [dict(page=1, text="OCR 正文", score=.9, lines=1)], 1)
+
+    def tearDown(self):
+        shutil.rmtree(self.dir, ignore_errors=True)
+
+    def test_atomic_replace_failure_keeps_original_markdown(self):
+        original = open(self.md, encoding="utf-8").read()
+        with mock.patch.object(fsutil, "atomic_write_text", side_effect=OSError("disk full")):
+            with self.assertRaises(ocr_merge.MergeError) as ctx:
+                ocr_merge.merge_file(self.pdf)
+        self.assertIn("写入正式 Markdown 失败", str(ctx.exception))
+        self.assertEqual(open(self.md, encoding="utf-8").read(), original)
+
+    def test_source_change_during_merge_is_rejected(self):
+        real_read = fsutil.read_text_fallback
+        def mutate_after_read(path):
+            value = real_read(path)
+            with open(self.pdf, "ab") as fh:
+                fh.write(b"changed")
+            return value
+        with mock.patch.object(fsutil, "read_text_fallback", side_effect=mutate_after_read):
+            with self.assertRaises(ocr_merge.MergeError) as ctx:
+                ocr_merge.merge_file(self.pdf)
+        self.assertIn("合并期间 PDF 发生变化", str(ctx.exception))
+
+
+class BatchWriteFailureTest(unittest.TestCase):
+    def test_one_output_failure_does_not_stop_later_files(self):
+        root = tempfile.mkdtemp(prefix="pdf2md_batch_")
+        try:
+            for name in ("a.pdf", "b.pdf"):
+                with open(os.path.join(root, name), "wb") as fh:
+                    fh.write(b"%PDF-1.4")
+            report = dict(gate={"state": "pass", "chars": 120, "reason": "",
+                                "cjk": .9, "bad": 0}, backend="builtin", md="中文" * 60,
+                          shape="截图OCR", pages=1, imgs_kept=0, ocr_txt=None, resumed=False)
+            calls = []
+            real_write = fsutil.atomic_write_text
+            def fail_first(path, text):
+                calls.append(path)
+                if path.endswith("a.md"):
+                    raise OSError("disk full")
+                return real_write(path, text)
+            with mock.patch.object(convert, "convert_file", return_value=report):
+                with mock.patch.object(fsutil, "atomic_write_text", side_effect=fail_first):
+                    code = batch_convert.main([root])
+            self.assertEqual(code, 1)
+            self.assertTrue(os.path.isfile(os.path.join(root, "b.md")))
+            self.assertFalse(os.path.exists(os.path.join(root, "a.md")))
+            self.assertEqual(len(calls), 2)
+        finally:
+            shutil.rmtree(root, ignore_errors=True)
 
 
 class BatchTargetTest(unittest.TestCase):

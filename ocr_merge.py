@@ -82,6 +82,14 @@ def _backup_path_for(md_path):
     return md_path + ".ocr.bak"
 
 
+def _sha256_file(path, what):
+    """指纹读取失败也算合并前置条件不满足，不让 OSError 直接冒泡成 traceback。"""
+    try:
+        return fsutil.sha256_file(path)
+    except OSError as exc:
+        raise MergeError("读取%s指纹失败：%s" % (what, exc)) from exc
+
+
 def merge_file(pdf_path, txt_path=None, dry_run=False):
     """把 `<pdf>.ocr.txt` 合并进 `<stem>.md`。返回报告 dict；失败抛 MergeError。"""
     pdf_path = str(pdf_path)
@@ -89,6 +97,7 @@ def merge_file(pdf_path, txt_path=None, dry_run=False):
     txt = paddle_ocr.text_path_for(pdf_path, txt_path)
     if not os.path.isfile(txt):
         raise MergeError("缺 OCR 全文：%s（先跑 paddle 后端，或用 --ocr-text 指定）" % txt)
+    source_sha = _sha256_file(pdf_path, "PDF")
     if not paddle_ocr.is_complete(pdf_path, txt_path=txt_path):
         raise MergeError("OCR 全文不完整或与当前 PDF 不符（sidecar 校验失败）：%s" % txt)
     if not os.path.isfile(md_path):
@@ -97,6 +106,8 @@ def merge_file(pdf_path, txt_path=None, dry_run=False):
     pages = paddle_ocr.load_pages(txt)
     ocr_body = paddle_ocr.render_pages_text(pages, page_marks=False)
     old_md = fsutil.read_text_fallback(md_path)
+    if _sha256_file(pdf_path, "PDF") != source_sha:
+        raise MergeError("合并期间 PDF 发生变化，拒绝提交：%s" % pdf_path)
     body_before, img_sec = split_images(old_md)
     new_md = merge_text(ocr_body, old_md)
     report = dict(md=md_path, ocr_txt=str(txt), pages=len(pages),
@@ -108,7 +119,14 @@ def merge_file(pdf_path, txt_path=None, dry_run=False):
             fsutil.atomic_write_bytes(bak, old_md.encode("utf-8"))
             if fsutil.sha256_file(bak) != fsutil.sha256_text(old_md):
                 raise MergeError("备份校验失败：%s" % bak)
-        fsutil.atomic_write_text(md_path, new_md)
+        if _sha256_file(pdf_path, "PDF") != source_sha:
+            raise MergeError("提交前 PDF 已变化，拒绝覆盖：%s" % pdf_path)
+        try:
+            fsutil.atomic_write_text(md_path, new_md)
+        except OSError as exc:
+            raise MergeError("写入正式 Markdown 失败（原文件保持不变）：%s" % exc) from exc
+        if _sha256_file(md_path, "正式 Markdown") != fsutil.sha256_text(new_md):
+            raise MergeError("正式 Markdown 写入后校验失败：%s" % md_path)
         report["written"] = True
     return report
 

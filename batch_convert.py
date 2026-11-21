@@ -110,14 +110,14 @@ def main(argv=None):
             log_row(args.log, dict(pdf=p, ok=False, err=msg))
             continue
         seen_targets[out_abs] = p
-        os.makedirs(os.path.dirname(os.path.abspath(out)), exist_ok=True)
         started = time.time()
         try:
+            os.makedirs(os.path.dirname(os.path.abspath(out)), exist_ok=True)
             report = convert.convert_file(
                 p, backend=args.backend, extractor=args.extractor,
                 ocr_fallback=args.ocr_fallback, page_marks=args.page_marks,
                 images_root=os.path.dirname(os.path.abspath(out)))
-        except convert.PdfError as exc:
+        except (convert.PdfError, OSError) as exc:
             failed.append((os.path.basename(p), str(exc)[:80]))
             log_row(args.log, dict(pdf=p, ok=False, err=str(exc)[:200]))
             continue
@@ -134,7 +134,14 @@ def main(argv=None):
             continue
 
         md = report["md"]
-        fsutil.atomic_write_text(out, md)
+        try:
+            fsutil.atomic_write_text(out, md)
+        except OSError as exc:
+            msg = "写入失败：%s" % exc
+            failed.append((os.path.basename(p), msg[:80]))
+            log_row(args.log, dict(pdf=p, md=out, ok=False, err=msg[:200],
+                                  backend=report["backend"], gate=gate))
+            continue
         if gate["chars"] < convert.quality.MIN_CHARS:
             short += 1
         else:

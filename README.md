@@ -186,7 +186,7 @@ py -3.11 batch_convert.py "<源目录>" --mirror "<输出目录>" --backend stru
 - **不抽内嵌图片（内置路径）**。截图型 PDF 的那张长图只用于 OCR，不解出、不落盘、不进 MD；`structured` 才会把配图存到 `<stem>.images/` 并在 md 末尾列引用。
 - **截图路径假设窄**：单页 + 单张整页图 + `DeviceRGB` + 8bit + `FlateDecode`。换别的 PDF 生成器（多页、CMYK、JPEG2000、`DCTDecode`）会返回 `None` 并报错，需按需扩 `extract_image`。**多页扫描件只转面积最大那页**（当前实现不拼页），`--check` 不会为此报警 —— 已知天花板。
 - **依赖本机能力，不可移植**：截图型要 Windows PowerShell 5.1（`pwsh 7` 里 WinRT 投影类型加载失败）+ 中文 OCR 语言包（实测只有 `zh-Hans-CN`）；文字层要 poppler。换机器先跑 `--check` 看「OCR 可用」「pdftotext」两行。
-- **可选后端各带一份新依赖，缺了就明说**：`structured` 要 `pymupdf`/`pymupdf4llm`（`pypdf` 仅空正文兜底时用，缺了不报错）；`paddle` 要另装 PaddleOCR-json，用 `PDF2MD_OCR_EXE` 或 `PDF2MD_OCR_DIR` 指过去（也认历史变量名 `KB_OCR_ENGINE_EXE`/`KB_OCR_ENGINE_DIR`）。`--check` 的「结构化抽取」与「PaddleOCR-json」两行就是判据。
+- **可选后端各带一份新依赖，缺了就明说**：`structured` 要 `pymupdf`/`pymupdf4llm`（`pypdf` 仅主抽取质量不达标时（空正文/乱码/低中文）兜底，缺了不报错）；`paddle` 要另装 PaddleOCR-json，用 `PDF2MD_OCR_EXE` 或 `PDF2MD_OCR_DIR` 指过去（也认历史变量名 `KB_OCR_ENGINE_EXE`/`KB_OCR_ENGINE_DIR`）。`--check` 的「结构化抽取」与「PaddleOCR-json」两行就是判据。
 - **页级 OCR 的路径限制**：引擎只接受 **ASCII 图片路径**，脚本会把渲染图放进 ASCII 临时目录（系统临时目录含中文时回退到 `%SystemRoot%\Temp`），两者都不可用就直接报错；单页实测 0.8–1.0 s，多页扫描件按页数估算时间。
 - **OCR 很慢**：11 份跑完 `--check` 共 24–26 秒（最长那份 12 片）；batch 时耐心等，别以为卡死。
 - **结构化预检会完整抽一遍**：`--check` 为了给门禁结论必须真抽正文，一份 266 页的样本约 70 秒（`--apply` 同级）；`paddle` 的预检已改成零 OCR，只读 sidecar。配图字节在抽取期间整批驻留内存（121 张 PNG 约几十 MB），图片极多的画册要留意内存。

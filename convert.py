@@ -911,7 +911,7 @@ def _builtin_body(path, raw, kind):
 
 
 def _structured_body(path, extractor="pymupdf4llm", images_root=None, write_images=True):
-    """结构化路径：pymupdf4llm 主路 + pypdf 空正文兜底，配图落到 <同名>.images/。
+    """结构化路径：pymupdf4llm 主路 + pypdf 质量兜底，配图落到 <同名>.images/。
 
     `images_root` 默认取 PDF 所在目录；批量 `--out/--mirror` 时传产物目录，
     否则 md 与图片分家、相对引用会断。
@@ -1061,8 +1061,12 @@ def check_file(path, backend="auto", extractor="pymupdf4llm"):
     if not os.path.isfile(path):
         print("文件不存在：" + path, file=sys.stderr)
         return 1
-    with open(path, "rb") as fh:
-        raw = fh.read()
+    try:
+        with open(path, "rb") as fh:
+            raw = fh.read()
+    except OSError as exc:
+        print("读取失败：%s" % exc, file=sys.stderr)
+        return 1
     if not detect_pdf(raw):
         print("不是 PDF 文件：" + path, file=sys.stderr)
         return 1

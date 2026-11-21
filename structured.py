@@ -24,6 +24,7 @@ import re
 import sys
 
 import fsutil
+import quality
 
 MIN_IMG_SIDE = 80              # 小于这个边长的图一律不要（图标/水印碎片）
 DECORATIVE_MIN_PAGES = 4       # 装饰图判定下限：出现页数 >= max(4, 总页/3)
@@ -235,12 +236,30 @@ def _restore_messages(pymupdf, old):
         pass
 
 
+def _prefer_pypdf_fallback(primary_md, candidate_md):
+    """只有质量门禁等级提升时才接受 pypdf 候选，避免按长度盲选。"""
+    primary_gate = quality.assess(primary_md or "")
+    candidate_gate = quality.assess(candidate_md or "")
+    rank = {"fail": 0, "review": 1, "pass": 2}
+    return rank[candidate_gate["state"]] > rank[primary_gate["state"]]
+
+
+def _pypdf_fallback_md(path, primary_md):
+    """主抽取质量未达标时试 pypdf：候选本身失败不能拖垮主结果，只接受更优候选。"""
+    try:
+        candidate = _md_via_pypdf(path)
+    except StructuredError as exc:
+        print("警告：pypdf 兜底失败，保留主抽取结果：%s" % exc, file=sys.stderr)
+        return None
+    return candidate if _prefer_pypdf_fallback(primary_md, candidate) else None
+
+
 def extract(path, images_dir=None, images_rel="images", stem=None,
             extractor="pymupdf4llm", allow_fallback=True, write_images=True):
     """PDF → (结构化 md, 图片段)。返回 dict：md/pages/extractor/imgs_kept/imgs_skipped。
 
-    `allow_fallback`：主抽取器抽出空正文时，若 pypdf 可用则降级重抽一次——
-    与 pdf2md 既有原则「空结果必降级」一致，不静默交一份空 md。
+    `allow_fallback`：主抽取结果未通过质量门禁（空正文/过短/乱码/低中文）且 pypdf 可用时，
+    重抽一次；只有候选质量等级更高才采用，候选自身失败不影响主结果。
     `write_images=False`：只统计配图、不落盘（`--check` 用，预检必须零写盘）。
     """
     if extractor not in EXTRACTORS:
@@ -259,9 +278,16 @@ def extract(path, images_dir=None, images_rel="images", stem=None,
                 used = extractor
                 if extractor == "pymupdf4llm":
                     md = _md_via_pymupdf4llm(doc)
-                    if allow_fallback and not md.strip() and pypdf_available():
-                        md = _md_via_pypdf(path)
-                        used = "pypdf(空正文兜底)"
+                    # 不只兜底完全空正文：长度/乱码/CJK 门禁发现的明显低质量结果，
+                    # 若 pypdf 候选质量等级更高才替换，避免单纯按文本长度误选。
+                    if (allow_fallback and pypdf_available()
+                            and quality.assess(md or "")["state"] != "pass"):
+                        candidate = _pypdf_fallback_md(path, md)
+                        if candidate is not None:
+                            # 空正文仍沿用原标签，老调用方看到的形态说明不变
+                            used = ("pypdf(空正文兜底)" if not (md or "").strip()
+                                    else "pypdf(质量兜底)")
+                            md = candidate
                 else:
                     md = _md_via_pypdf(path)
                 # 正文抽成功之后才落图：抽取失败不留孤立图片文件
