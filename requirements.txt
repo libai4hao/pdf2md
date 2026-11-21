@@ -5,7 +5,7 @@
 # subprocess / sys / tempfile / zlib / json / hashlib / unicodedata / importlib。
 # 故本文件对内置路径没有 pip 需求。
 #
-# 需要 Python 3.11+（开发与验证环境：Python 3.11.4，命令 `py -3.11`）。
+# 元数据要求 Python >=3.9；开发与 CI 验证 3.11 / 3.13，命令按 3.11 写（`py -3.11`）。
 # 注意 Windows 的 `py` 会读脚本 shebang 选解释器，依赖不在默认解释器里时请显式
 # `py -3.11 convert.py`（见 PITFALLS 坑 19）。
 #
@@ -16,7 +16,7 @@
 # A) --backend structured（结构化抽取 + 配图）
 #    - pymupdf           页面渲染 / 内嵌图抽取 / 页数统计（必需）
 #    - pymupdf4llm       标题/表格/列表结构化 md（主抽取器；必需）
-#    - pypdf             仅在 pymupdf4llm 抽出空正文时兜底（可选，缺了不降级）
+#    - pypdf             主抽取结果过不了质量门禁时兜底（空正文/乱码/低中文；可选，缺了不降级）
 #      python -m pip install pymupdf pymupdf4llm pypdf
 #    - 实测：Python 3.11.4 + pymupdf/pymupdf4llm 可用；pypdf 未装也能跑，只是不兜底。
 #

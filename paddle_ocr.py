@@ -300,7 +300,11 @@ def _restore_pair(txt, old_text, meta_path, old_meta):
 
 
 def save_text(pdf_path, pages, total_pages, txt_path=None, dpi=None, engine=None):
-    """原子落盘 OCR 全文 + sidecar；sidecar 证明「属于这份 PDF、覆盖全页、内容未改」。"""
+    """落盘 OCR 全文 + sidecar；sidecar 证明「属于这份 PDF、覆盖全页、内容未改」。
+
+    两个文件各自原子替换，但不构成跨文件事务：提交失败会回滚到旧版本；
+    若进程在两次替换之间被强杀，`is_complete()` 会拒绝这份半成品，下一次 run 重跑。
+    """
     txt = text_path_for(pdf_path, txt_path)
     text = render_pages_text(pages, page_marks=True)
     page_numbers = sorted({int(p["page"]) for p in pages})

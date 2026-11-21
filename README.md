@@ -2,7 +2,7 @@
 
 [![release](https://github.com/libai4hao/pdf2md/actions/workflows/release.yml/badge.svg)](https://github.com/libai4hao/pdf2md/actions/workflows/release.yml)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
-[![Changelog](https://img.shields.io/badge/changelog-v0.1.0-informational)](CHANGELOG.md)
+[![Changelog](https://img.shields.io/badge/changelog-v0.1.1-informational)](CHANGELOG.md)
 
 `pdf2md` 把中文 PDF 转成干净的 Markdown。核心路径只用 Python 标准库：截图型 PDF 走 WinRT OCR、文字层 PDF 走外部 `pdftotext`；可选后端补上 `pymupdf4llm` 结构化抽取（标题/表格/配图）与 PaddleOCR-json 页级 OCR，全程带三态质量门禁。
 
@@ -32,7 +32,7 @@
 
 ## 二、用法
 
-环境：Python 3.11（`py`），内置路径无 `pip install`（见 [requirements.txt](requirements.txt)）。各形态所需外部能力：截图型与伪文字层兜底都要 Windows PowerShell 5.1 + 中文 OCR 语言包；文字层要 poppler 的 `pdftotext`；伪文字层兜底还要 `pdftoppm`（一般随 `pdftotext` 一起装）。可选后端另需 `pymupdf` / `pymupdf4llm`（结构化）、`PaddleOCR-json` 引擎（页级 OCR），见第七节。
+环境：Python ≥3.9（`pyproject.toml` 元数据）；开发与 CI 验证用 3.11 / 3.13，下面命令按 3.11 写（`py -3.11`）。内置路径无 `pip install`（见 [requirements.txt](requirements.txt)）。各形态所需外部能力：截图型与伪文字层兜底都要 Windows PowerShell 5.1 + 中文 OCR 语言包；文字层要 poppler 的 `pdftotext`；伪文字层兜底还要 `pdftoppm`（一般随 `pdftotext` 一起装）。可选后端另需 `pymupdf` / `pymupdf4llm`（结构化）、`PaddleOCR-json` 引擎（页级 OCR），见第七节。
 
 **装成命令**（可选，`pyproject.toml` 已就绪）：
 
@@ -157,7 +157,7 @@ py -3.11 batch_convert.py "<源目录>" --mirror "<输出目录>" --backend stru
 | 残留检测 | `residual_noise(md)` | 扫 `<script`/`<div`/`data-v-`/`&nbsp;` 等 |
 | 后端路由 | `resolve_backend(backend, kind, extractor)` | `auto`：文字层且结构化可用 → `structured`；截图型/伪文字层/未知 → `builtin`（不自动换引擎） |
 | 只读预检 | `check_file(path, ...)` | 形态/依赖/后端/门禁一次打全；**不落配图、不触发页级 OCR**（`write_images=False`，paddle 只读回 sidecar） |
-| 结构化抽取 | `structured.extract(path, ...)` | `pymupdf4llm.to_markdown(write_images=False)` → 空正文且 pypdf 可用时降级 `pypdf` |
+| 结构化抽取 | `structured.extract(path, ...)` | `pymupdf4llm.to_markdown(write_images=False)`；主结果过不了质量门禁且 pypdf 可用时重抽一次，**只有质量等级提升才采用**，候选失败保留主结果 |
 | 抽配图 | `structured._collect_images(doc, ...)` | `<80px` 跳过；`colorspace.n>3` 转 sRGB；同图出现 `>= max(4, 页数/3)` 页判装饰；同 hash 去重；落 `<stem>.images/<stem>_<hash>.png`，md 末尾追加「## 配图」 |
 | 页级 OCR | `paddle_ocr.run(pdf, ...)` | 逐页 pymupdf 渲染（`PDF2MD_OCR_DPI`，默认 200）→ 常驻引擎一页一请求 → 页标记全文 + sidecar |
 | 续跑校验 | `paddle_ocr.is_complete(pdf)` | 源 sha256 / 总页数 / 已完成页 / 输出 sha256 四道全过才算完成，异常一律 `False`（fail closed） |
@@ -191,6 +191,7 @@ py -3.11 batch_convert.py "<源目录>" --mirror "<输出目录>" --backend stru
 - **OCR 很慢**：11 份跑完 `--check` 共 24–26 秒（最长那份 12 片）；batch 时耐心等，别以为卡死。
 - **结构化预检会完整抽一遍**：`--check` 为了给门禁结论必须真抽正文，一份 266 页的样本约 70 秒（`--apply` 同级）；`paddle` 的预检已改成零 OCR，只读 sidecar。配图字节在抽取期间整批驻留内存（121 张 PNG 约几十 MB），图片极多的画册要留意内存。
 - **`--strict` 批量失败可能留下配图**：结构化路径先落图再判门禁，`--strict` 拦下正文时 `<stem>.images/` 已经写入（重跑会复用同 hash 文件名，不产生垃圾堆积，但不是零残留）。要绝对干净就先删掉该目录再重跑。
+- **OCR 全文与 sidecar 不是跨文件事务**：两者各自原子替换，但两次替换之间被强杀会留下不匹配的一对。`is_complete()` 会拒绝半成品并由下次 OCR 重跑；不会自动恢复上一份完整版本。合并前会核对 PDF 指纹，期间源文件变化则拒绝覆盖。
 - **默认只读**：不加 `--apply` 绝不写盘；`--apply` 且目标已存在会自动 `.md.bak` 备份，覆盖前可回滚。**重复 `--apply` 不会用上次产物顶掉首次备份**（`.bak` 已存在就跳过），所以第二次起 `.bak` 始终是最初那份。
 
 ---
@@ -199,7 +200,7 @@ py -3.11 batch_convert.py "<源目录>" --mirror "<输出目录>" --backend stru
 
 ```pwsh
 cd pdf2md
-py -3.11 -m unittest -v        # 169 条测试，全绿（OCR 打桩、pymupdf 用例按本机能力跳过）
+py -3.11 -m unittest -v        # 186 条测试，全绿（OCR 打桩、pymupdf 用例按本机能力跳过）
 py -3.11 convert.py "<路径>.pdf" --check
 ```
 
@@ -240,7 +241,7 @@ py -3.11 convert.py "<路径>.pdf" --check
 - 截图为 OCR 结果，**未逐字校对**，已知瑕疵见「四、运行风险与边界」；
 - 全部临时产物（`_proto_pdf.py`、`mkdtemp` 临时目录、`_pdfout*/`、`__pycache__`）验证后已清理；11 份语料 PDF 零改动。
 
-单测覆盖（`test_convert.py` 113 条；README 旧版写 96 条，后续补了题号标题化等用例）：
+单测覆盖（`test_convert.py` 116 条；README 旧版写 96 条，后续补了题号标题化等用例）：
 
 - `PdfDetectTest`(4)：文件头识别、三种形态判定；
 - `ExtractImageTest`(6)：像素往返、尺寸不符返回 None、无图返回 None、**多图时取最大页图而非第一张**、**缺 `/ColorSpace` 声明必须拒绝**、`/Width 5 0 R` 间接引用返回 None；
@@ -256,24 +257,34 @@ py -3.11 convert.py "<路径>.pdf" --check
 - `AdAndFragmentTest`(9)：行尾广告角标丢、**正文提「广告」保留**、扫码引流丢、**`0`/`打开`/`继续`/`知《` OCR 碎片丢**、**`与`/`适配`/`融合` 等 1–2 字正文保留**、**表格首列孤立数字保留**、`囗复知乎用户` 剥离、信息流广告卡丢、**正文中段「查看详情」保留**；
 - `ParasPipelineTest`(1)：页码 + 推荐区 + 引流 + 数字串 + 正文混排的端到端结果；
 - `TailTruncateTest`(7)：末尾连续 ≥3 段问句截断、**2 段不动（正文连续设问）**、**中间的问句不动**、「关注·回答」计数行也算信息流段、锚点词截断、**锚点在前半段不动**、端到端含尾部截断；
+- `QuestionHeadingTest`(17)：题号标题化——单题/连续题升级、中英逗号形态、**小数与多级编号不误判**、答案内部编号、非连续编号、超大题号、空答案、跨行答案等；
 - `OcrScriptTest`(3)：OCR 脚本确实调用 WinRT API、按 `slice_*` 文件名排序、`ocr_available()` 返回 bool；
 - `FindPdftotextTest`(4)：环境变量优先、环境变量指向不存在文件时不原样返回、**PATH 上坏的 exe 必须跳过继续找**、全坏返回 None；
 - `PdftotextWorksTest`(4)：非零退出返回 False、版本横幅返回 True、启动抛 OSError 返回 False、None 返回 False；
 - `RenderMarkdownTest`(4)：H1 + 注记、段落空行分隔、残留检测干净/命中；
 - `ProcessFileTest`(9)：dry-run 不写盘、`--apply` 写盘、`--apply` 备份已有、`--no-backup` 不备份、非 PDF 抛 `PdfError`、**连续两次 `--apply` 不覆盖原始备份**、**超时转 `PdfError`**、**读盘 OSError 转 `PdfError`**、**空正文给 stderr 警告**；
-- `CliTest`(3)：`--check --apply` 互斥、缺参数退出、运行期异常退出码 1。
+- `CliTest`(3)：`--check --apply` 互斥、缺参数退出、运行期异常退出码 1；
+- `PackagingTest`(3)：版本号单一来源（`convert.__version__`）、三个 console script 指向真实函数、CHANGELOG 覆盖当前版本。
 
 OCR 单测全部打桩（`convert.ocr_pdf = lambda raw: [...]`），因为真 OCR 依赖本机 WinRT 与语言包，进夹具会让测试不可移植。
 
-**合并进来能力的单测（`test_merge.py` 56 条）**，同样只锁可移植的部分，pymupdf 用例按本机能力 `skipUnless`：
+**合并进来能力的单测（`test_merge.py` 70 条）**，同样只锁可移植的部分，pymupdf / pymupdf4llm 用例按本机能力 `skipUnless`：
 
 - `FsutilTest`(5)：原子替换且不残留临时文件、`safe_name` 收敛非法字符/保留名/超长、sha256 与 doc_hash、GB18030 回读、二进制拒读；
-- `QualityTest`(9)：Kangxi 部首经 NFKC 归一后算中文、CJK 扩展 A、过短/乱码/低 CJK/健康四态、**配图语法与页标记不稀释 CJK**、只有页标记时判空、阈值与上游同值；
+- `QualityTest`(10)：Kangxi 部首经 NFKC 归一后算中文、CJK 扩展 A、过短/乱码/低 CJK/健康四态、**配图语法与页标记不稀释 CJK**、只有页标记时判空、指标字段形状、阈值与上游同值；
 - `StructuredFilterTest`(5)：装饰图阈值 `max(4, 页/3)`（**2 页重复不算装饰**）、同 hash 去重且保留首次页号、配图段格式、抽取器可用性快照；
-- `StructuredExtractTest`(5，需 pymupdf)：**6 页里 4 页重复的装饰图不落盘、正文图留 1 张**、`write_images=False` 时统计照算但**一个文件都不落**、20px 小图在入库前就被过滤、正文 PDF 页数与 CJK 抽取、页数/渲染/越界；
+- `StructuredExtractTest`(6，需 pymupdf；其中 4 条另需 pymupdf4llm)：**6 页里 4 页重复的装饰图不落盘、正文图留 1 张**、`write_images=False` 时统计照算但**一个文件都不落**、20px 小图在入库前就被过滤、正文 PDF 页数与 CJK 抽取、页数/渲染/越界、缺失 PDF 报错；
+- `StructuredFallbackQualityTest`(1)：pypdf 候选只在门禁等级提升时被接受；
+- `StructuredFallbackRobustnessTest`(3)：候选抽取失败保留主结果、更优候选被采用、较差/同级候选被丢弃；
 - `PaddleParsingTest`(5)：页范围解析（**`-1` 是负号不是范围**、非法段跳过、超界裁剪）、sidecar 路径、嵌套 `text/score` 收集、**非 ASCII 图片路径必须拒**、页标记默认不写正文；
+- `PaddleEngineFailureTest`(2)：启动 `OSError` 与 stdin BrokenPipe 都转 `OcrError` 并保留 `__cause__`；
+- `PaddleStartupCleanupTest`(1)：引擎在 init 前退出时必须收掉进程句柄；
 - `PaddleTextStoreTest`(7，需 pymupdf)：落盘即完整、**页不全/正文被追加/源 PDF 被换/meta 标记关掉都不算完成**、**引擎返回空串也不算完成**、页标记 round-trip；
+- `OcrSaveTransactionTest`(3)：sidecar 提交失败回滚旧版本、回滚失败不吞原始异常、源 PDF 不可读转 `OcrError`；
 - `OcrMergeTest`(5，需 pymupdf)：合并保留 H1 与「配图」段且把注记改写为页级 OCR、**第二次合并不覆盖首次备份**、dry-run 不写盘不留备份、缺 OCR 全文/OCR 不全都报错；
+- `OcrMergeFailureSafetyTest`(2，需 pymupdf)：真实 PDF 下写盘失败保留原文、合并期间源文件变化拒绝覆盖；
+- `CheckFileReadFailureTest`(1)：`--check` 读盘异常返回 1；
+- `BatchWriteFailureTest`(1)：首件写盘失败不影响后续 PDF；
 - `BackendRoutingTest`(5)：未知后端报错、显式后端透传、**auto 的截图型仍走 builtin**、auto 文字层按结构化可用性路由；
 - `ConvertIntegrationTest`(7)：报告带门禁与 shape、短正文照写但结论 fail、**`--strict` 不写盘**、结构化产物经 `_wrap` 拼头部、`--check` 打出后端与门禁行、**`--check --backend structured` 不创建 `.images/`**、`--page-marks` 不影响内置路径；
 - `BatchTargetTest`(1)：`--out` 平铺 / `--mirror` 镜像 / 默认 PDF 旁三种落点。
@@ -304,7 +315,7 @@ OCR 单测全部打桩（`convert.ocr_pdf = lambda raw: [...]`），因为真 OC
 
 | 上游管线 | pdf2md 落地 | 保留的行为 |
 | --- | --- | --- |
-| `kb/convert_one.py`（`pdf_to_md` / `pdf_extract_images` / `cjk_ratio`） | `structured.py` | pymupdf4llm 结构化主路、pypdf 兜底、`<80px` 过滤、CMYK→sRGB、跨页装饰图 `max(4, 页/3)`、同 hash 去重、`## 配图` 段 |
+| `kb/convert_one.py`（`pdf_to_md` / `pdf_extract_images` / `cjk_ratio`） | `structured.py` | pymupdf4llm 结构化主路、pypdf 质量兜底、`<80px` 过滤、CMYK→sRGB、跨页装饰图 `max(4, 页/3)`、同 hash 去重、`## 配图` 段 |
 | `kb/convert_one.py`（`safe_name`） | `fsutil.safe_name` | 非法字符收敛、Windows 保留名加前缀、80 字符截断 |
 | `kb/atomic.py` / `kb/hashing.py` | `fsutil.atomic_write_*` / `sha256_file` / `doc_hash` | 同目录临时文件 + fsync + `os.replace`；sha256 前 16 位短指纹 |
 | `ocr_pages.py` | `paddle_ocr.py` | 常驻引擎一页一请求、启动等 `OCR init completed.`、ASCII 图片路径、页标记全文、四道 sidecar 校验、崩溃重启一次 |
