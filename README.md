@@ -160,8 +160,8 @@ py -3.11 batch_convert.py "<源目录>" --mirror "<输出目录>" --backend stru
 | 只读预检 | `check_file(path, ...)` | 形态/依赖/后端/门禁一次打全；**不落配图、不触发页级 OCR**（`write_images=False`，paddle 只读回 sidecar） |
 | 结构化抽取 | `structured.extract(path, ...)` | `pymupdf4llm.to_markdown(write_images=False)`；主结果过不了质量门禁且 pypdf 可用时重抽一次，**只有质量等级提升才采用**，候选失败保留主结果 |
 | 抽配图 | `structured._collect_images(doc, ...)` | `<80px` 跳过；`colorspace.n>3` 转 sRGB；同图出现 `>= max(4, 页数/3)` 页判装饰；同 hash 去重；落 `<stem>.images/<stem>_<hash>.png`，md 末尾追加「## 配图」 |
-| 页级 OCR | `paddle_ocr.run(pdf, ...)` | 逐页 pymupdf 渲染（`PDF2MD_OCR_DPI`，默认 200）→ 常驻引擎一页一请求 → 页标记全文 + sidecar |
-| 续跑校验 | `paddle_ocr.is_complete(pdf)` | 源 sha256 / 总页数 / 已完成页 / 输出 sha256 四道全过才算完成，异常一律 `False`（fail closed） |
+| 页级 OCR | `paddle_ocr.run(pdf, ...)` | 逐页 pymupdf 渲染（`PDF2MD_OCR_DPI`，默认 200）→ 常驻引擎一页一请求 → 版本目录 + 原子指针 |
+| 续跑校验 | `paddle_ocr.is_complete(pdf)` | 源 sha256 / 总页数 / 已完成页 / 版本正文 sha256 / 版本 sidecar sha256 全过才算完成，异常一律 `False`（fail closed） |
 | OCR 合并 | `ocr_merge.merge_file(pdf)` | 旧头部（注记改写为页级 OCR）+ OCR 正文 + 原「## 配图」段；备份 `<md>.ocr.bak` 只在没有备份时创建 |
 | 质量门禁 | `quality.assess(md)` | NFKC → 去 Markdown/页标记 → 可见字符 `<100` fail / 异常字符 `>=2%` fail / **4+ 连续同字（仅 CJK）`>=30%` review（重复堆叠）** / CJK `<15%` review / 其余 pass |
 
@@ -192,7 +192,7 @@ py -3.11 batch_convert.py "<源目录>" --mirror "<输出目录>" --backend stru
 - **OCR 很慢**：11 份跑完 `--check` 共 24–26 秒（最长那份 12 片）；batch 时耐心等，别以为卡死。
 - **结构化预检会完整抽一遍**：`--check` 为了给门禁结论必须真抽正文，一份 266 页的样本约 70 秒（`--apply` 同级）；`paddle` 的预检已改成零 OCR，只读 sidecar。配图字节在抽取期间整批驻留内存（121 张 PNG 约几十 MB），图片极多的画册要留意内存。
 - **`--strict` 的配图回收只针对本次新建**：结构化路径先落图再判门禁，`--strict` 拦下正文时会删掉本次写入的图；同 hash 文件若原本已存在则保留，目录只在本次新建且已空时才删。**不是整目录清空**，重跑仍会复用同 hash 文件名。
-- **OCR 全文与 sidecar 不是跨文件事务**：两者各自原子替换，但两次替换之间被强杀会留下不匹配的一对。`is_complete()` 会拒绝半成品并由下次 OCR 重跑；不会自动恢复上一份完整版本。合并前会核对 PDF 指纹，期间源文件变化则拒绝覆盖。
+- **OCR 是版本目录 + 原子指针**：每次成功提交先写完整 `<pdf>.ocr/versions/<version>/text.txt` + `meta.json`，最后原子替换 `<pdf>.ocr.txt.meta.json` 指针。进程在任意一步被强杀，只会停在「旧指针 + 旧版本」或「新指针 + 新版本」，不会出现正文与 sidecar 半配对。`<pdf>.ocr.txt` 是可读镜像，可能落后于指针；校验与合并都读指针指向的版本正文，下一次成功保存会重新对齐镜像。v1 老 sidecar 仍可只读兼容，下次保存升级为 v2。
 - **默认只读**：不加 `--apply` 绝不写盘；`--apply` 且目标已存在会自动 `.md.bak` 备份，覆盖前可回滚。**重复 `--apply` 不会用上次产物顶掉首次备份**（`.bak` 已存在就跳过），所以第二次起 `.bak` 始终是最初那份。
 
 ---
@@ -201,7 +201,7 @@ py -3.11 batch_convert.py "<源目录>" --mirror "<输出目录>" --backend stru
 
 ```pwsh
 cd pdf2md
-py -3.11 -m unittest -v        # 191 条测试，全绿（OCR 打桩、pymupdf 用例按本机能力跳过）
+py -3.11 -m unittest -v        # 194 条测试，全绿（OCR 打桩、pymupdf 用例按本机能力跳过）
 py -3.11 convert.py "<路径>.pdf" --check
 ```
 
@@ -269,7 +269,7 @@ py -3.11 convert.py "<路径>.pdf" --check
 
 OCR 单测全部打桩（`convert.ocr_pdf = lambda raw: [...]`），因为真 OCR 依赖本机 WinRT 与语言包，进夹具会让测试不可移植。
 
-**合并进来能力的单测（`test_merge.py` 75 条）**，同样只锁可移植的部分，pymupdf / pymupdf4llm 用例按本机能力 `skipUnless`：
+**合并进来能力的单测（`test_merge.py` 78 条）**，同样只锁可移植的部分，pymupdf / pymupdf4llm 用例按本机能力 `skipUnless`：
 
 - `FsutilTest`(5)：原子替换且不残留临时文件、`safe_name` 收敛非法字符/保留名/超长、sha256 与 doc_hash、GB18030 回读、二进制拒读；
 - `QualityTest`(11)：Kangxi 部首经 NFKC 归一后算中文、CJK 扩展 A、过短/乱码/低 CJK/健康四态、**4+ 连续同字堆叠进 review 且偶发叠字不误伤**、**配图语法与页标记不稀释 CJK**、只有页标记时判空、指标字段形状、阈值与上游同值；
@@ -282,6 +282,7 @@ OCR 单测全部打桩（`convert.ocr_pdf = lambda raw: [...]`），因为真 OC
 - `PaddleEngineFailureTest`(2)：启动 `OSError` 与 stdin BrokenPipe 都转 `OcrError` 并保留 `__cause__`；
 - `PaddleStartupCleanupTest`(1)：引擎在 init 前退出时必须收掉进程句柄；
 - `PaddleTextStoreTest`(7，需 pymupdf)：落盘即完整、**页不全/正文被追加/源 PDF 被换/meta 标记关掉都不算完成**、**引擎返回空串也不算完成**、页标记 round-trip；
+- `OcrVersionCommitTest`(3)：版本目录 + 原子指针；指针写失败保留上一版、指针提交后崩溃仍以新版本为准、v1 老 sidecar 兼容可读；
 - `OcrSaveTransactionTest`(3)：sidecar 提交失败回滚旧版本、回滚失败不吞原始异常、源 PDF 不可读转 `OcrError`；
 - `OcrMergeTest`(5，需 pymupdf)：合并保留 H1 与「配图」段且把注记改写为页级 OCR、**第二次合并不覆盖首次备份**、dry-run 不写盘不留备份、缺 OCR 全文/OCR 不全都报错；
 - `OcrMergeFailureSafetyTest`(2，需 pymupdf)：真实 PDF 下写盘失败保留原文、合并期间源文件变化拒绝覆盖；
@@ -292,7 +293,7 @@ OCR 单测全部打桩（`convert.ocr_pdf = lambda raw: [...]`），因为真 OC
 - `ConvertIntegrationTest`(7)：报告带门禁与 shape、短正文照写但结论 fail、**`--strict` 不写盘**、结构化产物经 `_wrap` 拼头部、`--check` 打出后端与门禁行、**`--check --backend structured` 不创建 `.images/`**、`--page-marks` 不影响内置路径；
 - `BatchTargetTest`(1)：`--out` 平铺 / `--mirror` 镜像 / 默认 PDF 旁三种落点。
 
-**合并后的真实冒烟**（2026-11-21，本机 3 页样例 PDF，`py -3.11`）：`--backend structured` 产出 582 字节 md + `样例书.images/`；`--backend paddle` 产出 556 字节 md + 407 字节 `.ocr.txt` + 463 字节 sidecar（`complete: true`、`completed_pages: [1,2,3]`）；`ocr_merge.py --dry-run/--apply` 均正常，备份为 `扫描件.md.ocr.bak`。空配图不再创建空目录。
+**合并后的真实冒烟**（2026-11-21，本机 3 页样例 PDF，`py -3.11`）：`--backend structured` 产出 582 字节 md + `样例书.images/`；`--backend paddle` 产出 556 字节 md + 407 字节 `.ocr.txt` + 463 字节 sidecar（`complete: true`、`completed_pages: [1,2,3]`；当时为 v1 布局，现升级为 v2 版本目录 + 指针，`.ocr.txt` 仍保留为镜像）；`ocr_merge.py --dry-run/--apply` 均正常，备份为 `扫描件.md.ocr.bak`。空配图不再创建空目录。
 
 **变异测试核对过断言有效性**（第二轮审查后补）：对 `convert.py` 做 10 处定向变异（丢像素、改灰度、去 filter 字节、备份无条件覆盖、噪声回到短行阈值、英文引号塞回免空格表、去掉空正文警告、不接超时、`slice_plan` 不校验参数、`png` 不校验尺寸），全部 10 个变异体都被测试杀死，还原后 `OK`。第一轮审查发现的「PNG 断言恒真假绿」就是这个环节暴露的。
 
@@ -321,7 +322,7 @@ OCR 单测全部打桩（`convert.ocr_pdf = lambda raw: [...]`），因为真 OC
 | `kb/convert_one.py`（`pdf_to_md` / `pdf_extract_images` / `cjk_ratio`） | `structured.py` | pymupdf4llm 结构化主路、pypdf 质量兜底、`<80px` 过滤、CMYK→sRGB、跨页装饰图 `max(4, 页/3)`、同 hash 去重、`## 配图` 段 |
 | `kb/convert_one.py`（`safe_name`） | `fsutil.safe_name` | 非法字符收敛、Windows 保留名加前缀、80 字符截断 |
 | `kb/atomic.py` / `kb/hashing.py` | `fsutil.atomic_write_*` / `sha256_file` / `doc_hash` | 同目录临时文件 + fsync + `os.replace`；sha256 前 16 位短指纹 |
-| `ocr_pages.py` | `paddle_ocr.py` | 常驻引擎一页一请求、启动等 `OCR init completed.`、ASCII 图片路径、页标记全文、四道 sidecar 校验、崩溃重启一次 |
+| `ocr_pages.py` | `paddle_ocr.py` | 常驻引擎一页一请求、启动等 `OCR init completed.`、ASCII 图片路径、页标记全文、版本目录 + 原子指针 + 五道校验、崩溃重启一次 |
 | `ocr_merge.py` | `ocr_merge.py` | 拆/接 `## 配图` 段、备份只在没有备份时创建、幂等合并 |
 | `gate.py` + `kb/textmetrics.py` | `quality.py` | NFKC 归一、乱码字符白名单、`<100 字符 fail` / `异常字符 ≥2% fail` / `CJK <15% review` |
 | `reconvert.py`（`_read_md`） | `fsutil.read_text_fallback` | `utf-8-sig → gb18030`，替换符过多即失败 |
@@ -329,7 +330,7 @@ OCR 单测全部打桩（`convert.ocr_pdf = lambda raw: [...]`），因为真 OC
 
 **与上游刻意不同的三处**（都能在产物里看见，不是隐性行为）：
 
-1. **产物就地放，不认语料根**。md 落在 PDF 旁，配图落 `<stem>.images/`（上游是 `20-题库MD/<类>/<题>/images/`），OCR 全文与 sidecar 落 `<pdf>.ocr.txt` / `.meta.json`（上游落 `build/ocr_text/<rel>.txt`）。理由：这个仓库是独立工具，不该要求 `KB_CORPUS_ROOT`；目录自包含才能换机器自证。
+1. **产物就地放，不认语料根**。md 落在 PDF 旁，配图落 `<stem>.images/`（上游是 `20-题库MD/<类>/<题>/images/`），OCR 版本目录与原子指针落 `<pdf>.ocr/` 与 `<pdf>.ocr.txt.meta.json`（上游落 `build/ocr_text/<rel>.txt`）。理由：这个仓库是独立工具，不该要求 `KB_CORPUS_ROOT`；目录自包含才能换机器自证。
 2. **md 正文不写页标记**。上游把 `===== page n =====` 留在 md 里做回溯；这里标记只留在 `.ocr.txt`，md 保持可读，需要回溯就开 `--page-marks` 或直接看 sidecar。
 3. **md 有统一头部**。上游 `pymupdf4llm` 原样吐正文；这里统一加 H1 + `> 来源/形态/说明`，与 `builtin` 产物形态一致（结构化正文里可能再出现一个 `#` 标题，属于 PDF 自身标题）。
 
@@ -348,8 +349,9 @@ OCR 单测全部打桩（`convert.ocr_pdf = lambda raw: [...]`），因为真 OC
 | `<stem>.md` | 总是 | 正文；原子替换写入 |
 | `<stem>.md.bak` | 覆盖已有 md 且没备份过 | 首次产物备份（不会二次覆盖） |
 | `<stem>.images/<stem>_<hash>.png` | `structured` 且抽到配图 | md 里以 `./<stem>.images/...` 相对引用 |
-| `<pdf>.ocr.txt` | `paddle` 或 `--ocr-fallback` 成功 | 带页标记的 OCR 全文 |
-| `<pdf>.ocr.txt.meta.json` | 同上 | 源 sha256 / 总页数 / 已完成页 / 输出 sha256 / `chars`（含页标记）/ `body_chars`（纯正文，用于判空）/ `complete` |
+| `<pdf>.ocr.txt` | `paddle` 或 `--ocr-fallback` 成功 | 当前版本的带页标记 OCR 全文**镜像**（可读，不参与校验） |
+| `<pdf>.ocr.txt.meta.json` | 同上 | **原子指针**：版本号 / 版本相对路径 / 源 sha256 / 总页数 / 已完成页 / 输出 sha256 / 版本 sidecar sha256 / `chars` / `body_chars` / `complete` |
+| `<pdf>.ocr/versions/<version>/text.txt` + `meta.json` | 同上 | 不可变版本目录；指针指向哪一版，校验与合并就用哪一版 |
 | `<stem>.md.ocr.bak` | `ocr_merge.py` 第一次合并 | 合并前的 md 快照 |
 
 **门禁与降级链路**（对应上游 `gate → dispatch → ocr_pages → ocr_merge`，去掉台账这一层）：
@@ -363,7 +365,7 @@ convert_file → 三态门禁 assess(md)
    └─ review/fail（都不给）          → 照写，stderr 打「质量门禁：…」并附指标
 ```
 
-`ocr_merge.py` 是合并的下半段：把 `<pdf>.ocr.txt` 回填为 `<stem>.md` 的正文，头部注记改写为「页级 OCR（PaddleOCR-json 合并）」，原「配图」段原样接回。**sidecar 不完整就拒绝合并**——宁可不合并，也不要把半份 OCR 顶掉正常产物。
+`ocr_merge.py` 是合并的下半段：把 OCR 当前版本回填为 `<stem>.md` 的正文，头部注记改写为「页级 OCR（PaddleOCR-json 合并）」，原「配图」段原样接回。**指针/sidecar 不完整就拒绝合并**——宁可不合并，也不要把半份 OCR 顶掉正常产物。读取时按指针解析版本正文，不依赖可能落后的 `.ocr.txt` 镜像。
 
 **没有合并的部分**（不是遗漏，是与「PDF→MD」无关）：`intake`/`classify`/`chunker`/`build_db`/`search`/`extract`/`verify_ledger`/`wlock`、`gate_report.json` 台账与 `dispatch_plan.csv`、语料树约定（`20-题库MD`、`31-收件箱`）、LLM 打标与隐私扫描。这些依赖 SQLite 台账、语料根与分类规则，搬进单文件工具只会带进一层不该有的状态。`wlock` 也只在多进程写库时才有意义，这里写盘已经是原子的。
 

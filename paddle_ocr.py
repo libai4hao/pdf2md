@@ -8,9 +8,12 @@
   - 启动后要等 `OCR init completed.`（实测初始化 0.8–1.0 s），否则第一页会撞超时；
   - **图片路径必须是 ASCII**，含中文会被引擎拒绝（文本输出路径不受限）；
   - 常驻进程一页一请求，避免反复加载模型（实测 0.8–1.0 s/页）；
-  - 页级结果落盘为 `<pdf>.ocr.txt`，带 `===== page n =====` 页标记；
-  - sidecar `<pdf>.ocr.txt.meta.json` 记录源 PDF sha256、总页数、已完成页、输出 hash、
-    `complete` 标志：没有 sidecar 或 hash 对不上的旧文件**不算完成**，批量会重跑。
+  - 页级结果按版本落盘：`<pdf>.ocr/versions/<version>/text.txt` + `meta.json`；
+  - `<pdf>.ocr.txt` 是当前版本的可读镜像，`<pdf>.ocr.txt.meta.json` 是**原子指针**，
+    记录源 PDF sha256、总页数、完成页、输出 hash、`complete` 与版本相对路径；
+  - 指针是唯一提交点：版本目录先写完整，最后原子替换指针；进程在任意一步被强杀，
+    只会留下「旧指针 + 旧版本」或「新指针 + 新版本」，不会出现正文/sidecar 半配对；
+  - 没有指针或 hash 对不上的旧文件**不算完成**，批量会重跑；v1 老布局仍可只读兼容。
 
 与上游的差异：储存在 PDF 旁的 sidecar（上游放在 build/ocr_text，靠台账 rel 定位），
 所以换目录/换机器也能自证「这份 OCR 文本属于这份 PDF 且覆盖全页」。
@@ -35,7 +38,8 @@ PAGE_MARK_FMT = "\n\n===== page {n} =====\n\n"
 PAGE_MARK_RE = re.compile(r"^[ \t]*=====[ \t]*page[ \t]+(\d+)[ \t]*=====[ \t]*$", re.I | re.M)
 EXE_NAME = "PaddleOCR-json.exe"
 DEFAULT_DPI = 200
-META_FORMAT_VERSION = 1
+META_FORMAT_VERSION = 2
+LEGACY_FORMAT_VERSION = 1
 
 
 class OcrError(Exception):
@@ -287,6 +291,66 @@ def meta_path_for(txt_path):
     return Path(str(txt_path) + ".meta.json")
 
 
+def store_root_for(txt_path):
+    """版本目录根：默认 `<pdf>.ocr/`；自定义 `--ocr-text` 时退化为 `<txt>.ocr/`。"""
+    text = str(txt_path)
+    if text.endswith(".ocr.txt"):
+        return Path(text[:-len(".ocr.txt")] + ".ocr")
+    return Path(text + ".ocr")
+
+
+def _version_text_path(txt_path, meta):
+    """按 sidecar 里的相对路径解析版本正文；拒绝跳出 OCR 根目录。"""
+    rel = meta.get("text_file")
+    if not rel:
+        return None
+    base = Path(str(txt_path)).parent.resolve()
+    try:
+        target = (base / rel).resolve()
+    except OSError:
+        return None
+    if base not in target.parents:
+        return None
+    return target
+
+
+def resolve_text_path(txt_path):
+    """返回当前版本的正文路径：v2 指针指向版本目录，v1/无 sidecar 回退到 `<txt>`。"""
+    txt = Path(txt_path)
+    meta_path = meta_path_for(txt)
+    if not meta_path.is_file():
+        return txt
+    try:
+        meta = json.loads(meta_path.read_text(encoding="utf-8"))
+    except (OSError, ValueError) as exc:
+        raise OcrError("OCR 版本指针不可读：%s（%s）" % (meta_path, exc)) from exc
+    if meta.get("format_version") != META_FORMAT_VERSION:
+        return txt
+    target = _version_text_path(txt, meta)
+    if target is None or not target.is_file():
+        raise OcrError("OCR 版本指针指向的正文不存在：%s" % meta_path)
+    return target
+
+
+def active_text_path(pdf_path, txt_path=None):
+    return resolve_text_path(text_path_for(pdf_path, txt_path))
+
+
+def sync_mirror(txt_path):
+    """把 `<txt>` 镜像对齐到指针指向的版本；失败只告警，不影响指针/版本的正确性。"""
+    txt = Path(txt_path)
+    try:
+        active = resolve_text_path(txt)
+        if active.resolve() == txt.resolve():
+            return
+        data = active.read_bytes()
+        if txt.is_file() and fsutil.sha256_file(txt) == fsutil.sha256_file(active):
+            return
+        fsutil.atomic_write_bytes(txt, data)
+    except OSError as exc:
+        print("警告：OCR 镜像对齐失败（不影响版本校验）：%s" % exc, file=sys.stderr)
+
+
 def _restore_pair(txt, old_text, meta_path, old_meta):
     """把 OCR 全文/sidecar 恢复到提交前状态：原本不存在的单边就清理新建的那一边。"""
     for path, data in ((txt, old_text), (meta_path, old_meta)):
@@ -300,10 +364,13 @@ def _restore_pair(txt, old_text, meta_path, old_meta):
 
 
 def save_text(pdf_path, pages, total_pages, txt_path=None, dpi=None, engine=None):
-    """落盘 OCR 全文 + sidecar；sidecar 证明「属于这份 PDF、覆盖全页、内容未改」。
+    """落盘 OCR 全文 + sidecar；sidecar 是**原子指针**，指向版本目录里的完整正文。
 
-    两个文件各自原子替换，但不构成跨文件事务：提交失败会回滚到旧版本；
-    若进程在两次替换之间被强杀，`is_complete()` 会拒绝这份半成品，下一次 run 重跑。
+    v2 布局：`<pdf>.ocr/versions/<version>/text.txt` + `meta.json` 先写完整，
+    最后原子替换 `<pdf>.ocr.txt.meta.json` 指针，再刷新 `<pdf>.ocr.txt` 只读镜像。
+    进程在任意一步被强杀，指针要么仍指旧版本、要么已指新版本；不会出现
+    「正文是新版、sidecar 是旧版」的半成品。`is_complete()` 只信指针与版本目录，
+    镜像落后不影响校验；下一次成功提交会重新对齐镜像。
     """
     txt = text_path_for(pdf_path, txt_path)
     text = render_pages_text(pages, page_marks=True)
@@ -313,35 +380,57 @@ def save_text(pdf_path, pages, total_pages, txt_path=None, dpi=None, engine=None
         source_sha = fsutil.sha256_file(pdf_path)
     except OSError as exc:
         raise OcrError("读取源 PDF 失败：%s" % exc) from exc
+    output_sha = fsutil.sha256_text(text)
+    version = "%d-%s" % (time.time_ns(), output_sha[:8])
     meta = dict(
         format_version=META_FORMAT_VERSION,
+        version=version,
         source_sha256=source_sha,
         total_pages=int(total_pages),
         completed_pages=page_numbers,
         complete=len(pages) == len(page_numbers) == int(total_pages) and page_numbers == all_pages,
-        output_sha256=fsutil.sha256_text(text),
+        output_sha256=output_sha,
         chars=len(text),
         body_chars=sum(len((p["text"] or "").strip()) for p in pages),
         page_markers=True,
         dpi=dpi or default_dpi(),
         engine=engine or engine_exe(),
     )
+    meta_json = json.dumps(meta, ensure_ascii=False, indent=1, sort_keys=True)
     meta_path = meta_path_for(txt)
-    # 两个文件无法用单次 rename 组成跨文件事务。先保留旧版本快照；普通异常时回滚，
-    # 进程/机器崩溃发生在两次 replace 之间时，is_complete 的 hash 校验会拒绝半成品，
-    # 下一次 run 自动重跑，而不会把不匹配的文本当作完成结果。
+    store = store_root_for(txt)
+    version_dir = store / "versions" / version
+    text_file = version_dir / "text.txt"
+    meta_file = version_dir / "meta.json"
+    pointer = dict(meta,
+                   text_file=os.path.relpath(str(text_file), str(txt.parent)),
+                   meta_file=os.path.relpath(str(meta_file), str(txt.parent)),
+                   meta_sha256=fsutil.sha256_text(meta_json))
+    pointer_json = json.dumps(pointer, ensure_ascii=False, indent=1, sort_keys=True)
+    # 先保留旧镜像/旧指针快照；普通异常回滚，进程崩溃则由指针本身保证一致性。
     old_text = txt.read_bytes() if txt.is_file() else None
     old_meta = meta_path.read_bytes() if meta_path.is_file() else None
     try:
+        version_dir.mkdir(parents=True, exist_ok=True)
+        fsutil.atomic_write_text(text_file, text)
+        fsutil.atomic_write_text(meta_file, meta_json)
+        # 提交点：指针原子替换后才算新版本生效
+        fsutil.atomic_write_text(meta_path, pointer_json)
+        # 兼容镜像：`<pdf>.ocr.txt` 始终是当前版本的一份拷贝，不是校验依据
         fsutil.atomic_write_text(txt, text)
-        fsutil.atomic_write_text(meta_path, json.dumps(meta, ensure_ascii=False, indent=1))
+        actual_text_sha = fsutil.sha256_file(text_file)
+        actual_mirror_sha = fsutil.sha256_file(txt)
+        actual_meta_sha = fsutil.sha256_file(meta_file)
         try:
-            actual_text_sha = fsutil.sha256_file(txt)
             actual_source_sha = fsutil.sha256_file(pdf_path)
         except OSError as exc:
-            raise OcrError("OCR 产物写入后读取校验失败：%s" % exc) from exc
-        if actual_text_sha != meta["output_sha256"]:
-            raise OcrError("OCR 全文写入后校验失败：%s" % txt)
+            raise OcrError("OCR 产物写入后读取源 PDF 失败：%s" % exc) from exc
+        if actual_text_sha != output_sha:
+            raise OcrError("OCR 版本正文写入后校验失败：%s" % text_file)
+        if actual_meta_sha != pointer["meta_sha256"]:
+            raise OcrError("OCR 版本 sidecar 写入后校验失败：%s" % meta_file)
+        if actual_mirror_sha != output_sha:
+            raise OcrError("OCR 全文镜像写入后校验失败：%s" % txt)
         if actual_source_sha != meta["source_sha256"]:
             raise OcrError("PDF 在 OCR 结果提交期间发生变化：%s" % pdf_path)
     except Exception:
@@ -355,19 +444,40 @@ def save_text(pdf_path, pages, total_pages, txt_path=None, dpi=None, engine=None
 
 
 def is_complete(pdf_path, total_pages=None, txt_path=None):
-    """sidecar 校验：源指纹、页集、输出 hash 全对上才算完成。异常一律 False。"""
+    """sidecar 校验：源指纹、页集、输出 hash 全对上才算完成。异常一律 False。
+
+    v2 只信原子指针：正文从版本目录读取，`<pdf>.ocr.txt` 镜像即使落后也不影响结论；
+    v1 老产物仍按「全文 + sidecar 同路径」兼容校验，下一次保存会升级为 v2。
+    """
     try:
         txt = text_path_for(pdf_path, txt_path)
         meta_path = meta_path_for(txt)
-        if not txt.is_file() or not meta_path.is_file():
+        if not meta_path.is_file():
             return False
         if total_pages is None:
             import structured
             total_pages = structured.page_count(pdf_path)
         total_pages = int(total_pages)
         meta = json.loads(meta_path.read_text(encoding="utf-8"))
-        if (meta.get("format_version") != META_FORMAT_VERSION
-                or meta.get("complete") is not True
+        fmt = meta.get("format_version")
+        if fmt == META_FORMAT_VERSION:
+            text_file = _version_text_path(txt, meta)
+            meta_file = meta.get("meta_file")
+            if text_file is None or not text_file.is_file() or not meta_file:
+                return False
+            version_meta = (txt.parent.resolve() / meta_file).resolve()
+            base = txt.parent.resolve()
+            if base not in version_meta.parents or not version_meta.is_file():
+                return False
+            if fsutil.sha256_file(version_meta) != meta.get("meta_sha256"):
+                return False
+        elif fmt == LEGACY_FORMAT_VERSION:
+            if not txt.is_file():
+                return False
+            text_file = txt
+        else:
+            return False
+        if (meta.get("complete") is not True
                 or meta.get("total_pages") != total_pages
                 or meta.get("completed_pages") != list(range(1, total_pages + 1))):
             return False
@@ -378,14 +488,17 @@ def is_complete(pdf_path, total_pages=None, txt_path=None):
             return False
         if meta.get("source_sha256") != fsutil.sha256_file(pdf_path):
             return False
-        return meta.get("output_sha256") == fsutil.sha256_file(txt)
+        return meta.get("output_sha256") == fsutil.sha256_file(text_file)
     except Exception:                                   # noqa: BLE001
         return False
 
 
 def load_pages(txt_path):
-    """把带页标记的 OCR 全文还原成 [{page,text}]；无标记时整篇当第 1 页。"""
-    text = fsutil.read_text_fallback(txt_path)
+    """把带页标记的 OCR 全文还原成 [{page,text}]；无标记时整篇当第 1 页。
+
+    如果 `<txt>.meta.json` 是 v2 指针，读的是指针指向的版本正文，而不是可能落后的镜像。
+    """
+    text = fsutil.read_text_fallback(resolve_text_path(txt_path))
     parts = PAGE_MARK_RE.split(text)
     if len(parts) == 1:
         return [dict(page=1, text=text.strip())]
@@ -415,8 +528,10 @@ def run(pdf_path, pages=None, dpi=None, txt_path=None, engine=None, retries=1):
     total = structured.page_count(pdf_path)
     txt = text_path_for(pdf_path, txt_path)
     if is_complete(pdf_path, total, txt_path=txt_path):
+        sync_mirror(txt)                         # 崩溃窗口可能留下旧镜像，续跑时顺手对齐
+        active = resolve_text_path(txt)
         return dict(pages=load_pages(txt), total_pages=total, txt=str(txt), resumed=True,
-                    stats=dict(pages=total, chars=len(fsutil.read_text_fallback(txt))))
+                    stats=dict(pages=total, chars=len(fsutil.read_text_fallback(active))))
     todo = pages if pages else list(range(1, total + 1))
     source_sha = fsutil.sha256_file(pdf_path)
     attempt = 0

@@ -18,6 +18,7 @@
 
 ### Changed
 
+- OCR 产物改为**版本目录 + 原子指针**：正文与 sidecar 先完整写入 `<pdf>.ocr/versions/<version>/`，最后原子替换 `<pdf>.ocr.txt.meta.json` 指针；`<pdf>.ocr.txt` 降级为可落后的可读镜像。指针提交前崩溃保留上一完整版本，提交后崩溃以新版本为准，不再出现正文/sidecar 半配对。v1 老 sidecar 仍可只读兼容。
 - 结构化兜底形态标签：空正文仍为 `pypdf(空正文兜底)`，非空低质量改用 `pypdf(质量兜底)`，老调用方的产物说明保持不变。
 - 质量门禁新增「4+ 连续同字（仅 CJK）占比」判据：`>=30%` 判 `review`（重复堆叠），用于兜住 OCR 复读/装饰字，不升级为 `fail`。
 
@@ -26,6 +27,7 @@
 - 结构化端到端用例按真实依赖 `pymupdf4llm` 跳过，`pymupdf` 单装时不再误报 ERROR/FAIL。
 - 新增 OCR 启动/管道故障、sidecar 提交回滚、合并写盘失败与源文件变化、批量写盘失败等故障注入用例；用真实单页 PDF 走完整合并前置校验，避免因 sidecar 先失败而误绿。
 - 新增重复堆叠门禁、pypdf logger 恢复、strict 配图回收、dry-run 零配图、批量分布不计失败件等回归用例。
+- 新增 OCR 版本提交用例：指针写失败保留上一版、指针提交后崩溃仍读新版本、v1 老 sidecar 兼容。
 - 新增 `.github/workflows/ci.yml`：`main` push 与 PR 在 Ubuntu/Windows × Python 3.11/3.13 上安装 `.[full]` 并跑 `python -m unittest`。
 
 ## [0.1.1] - 2026-11-21

@@ -95,7 +95,11 @@ def merge_file(pdf_path, txt_path=None, dry_run=False):
     pdf_path = str(pdf_path)
     md_path = _md_path_for(pdf_path)
     txt = paddle_ocr.text_path_for(pdf_path, txt_path)
-    if not os.path.isfile(txt):
+    try:
+        ocr_text = paddle_ocr.resolve_text_path(txt)
+    except paddle_ocr.OcrError as exc:
+        raise MergeError("OCR 版本指针损坏：%s（%s）" % (txt, exc)) from exc
+    if not ocr_text.is_file():
         raise MergeError("缺 OCR 全文：%s（先跑 paddle 后端，或用 --ocr-text 指定）" % txt)
     source_sha = _sha256_file(pdf_path, "PDF")
     if not paddle_ocr.is_complete(pdf_path, txt_path=txt_path):
@@ -110,7 +114,8 @@ def merge_file(pdf_path, txt_path=None, dry_run=False):
         raise MergeError("合并期间 PDF 发生变化，拒绝提交：%s" % pdf_path)
     body_before, img_sec = split_images(old_md)
     new_md = merge_text(ocr_body, old_md)
-    report = dict(md=md_path, ocr_txt=str(txt), pages=len(pages),
+    report = dict(md=md_path, ocr_txt=str(txt), ocr_version=str(ocr_text),
+                  pages=len(pages),
                   old_chars=len(body_before), new_chars=len(new_md),
                   imgs_kept=bool(img_sec), dry_run=bool(dry_run), written=False)
     if not dry_run:

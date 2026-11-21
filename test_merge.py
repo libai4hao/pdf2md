@@ -410,8 +410,8 @@ class PaddleTextStoreTest(unittest.TestCase):
         self.assertFalse(paddle_ocr.is_complete(self.pdf))
 
     def test_tampered_text_not_complete(self):
-        txt = paddle_ocr.save_text(self.pdf, self._pages(), total_pages=2)
-        with open(txt, "a", encoding="utf-8") as fh:
+        paddle_ocr.save_text(self.pdf, self._pages(), total_pages=2)
+        with open(paddle_ocr.active_text_path(self.pdf), "a", encoding="utf-8") as fh:
             fh.write("\n补一段")
         self.assertFalse(paddle_ocr.is_complete(self.pdf))
 
@@ -438,6 +438,80 @@ class PaddleTextStoreTest(unittest.TestCase):
         """引擎「成功」但返回空串：不能把空产物固化下来，必须允许重跑。"""
         paddle_ocr.save_text(self.pdf, self._pages(("", "")), total_pages=2)
         self.assertFalse(paddle_ocr.is_complete(self.pdf))
+
+
+@unittest.skipUnless(HAS_PYMUPDF, "需要本机安装 pymupdf")
+class OcrVersionCommitTest(unittest.TestCase):
+    """v2 版本目录 + 原子指针：指针写失败/指针后崩溃都不能把半成品当完成。"""
+
+    def setUp(self):
+        self.dir = tempfile.mkdtemp(prefix="pdf2md_ver_")
+        self.pdf = os.path.join(self.dir, "扫描件.pdf")
+        make_text_pdf(self.pdf, pages=2)
+        self.txt = paddle_ocr.text_path_for(self.pdf)
+        self.pages1 = [dict(page=1, text="旧版第一页", score=.9, lines=1),
+                       dict(page=2, text="旧版第二页", score=.9, lines=1)]
+        self.pages2 = [dict(page=1, text="新版第一页", score=.95, lines=1),
+                       dict(page=2, text="新版第二页", score=.95, lines=1)]
+
+    def tearDown(self):
+        shutil.rmtree(self.dir, ignore_errors=True)
+
+    def test_pointer_write_failure_keeps_previous_version(self):
+        paddle_ocr.save_text(self.pdf, self.pages1, 2)
+        old_pointer = _read_json(paddle_ocr.meta_path_for(self.txt))
+        real_write = fsutil.atomic_write_text
+        calls = []
+        def fail_pointer(path, text, *args, **kwargs):
+            calls.append(str(path))
+            if len(calls) == 3:                    # 1=text 2=meta 3=pointer
+                raise OSError("disk full")
+            return real_write(path, text, *args, **kwargs)
+        with mock.patch.object(fsutil, "atomic_write_text", side_effect=fail_pointer):
+            with self.assertRaises(OSError):
+                paddle_ocr.save_text(self.pdf, self.pages2, 2)
+        self.assertTrue(paddle_ocr.is_complete(self.pdf, 2))
+        self.assertEqual([p["text"] for p in paddle_ocr.load_pages(self.txt)],
+                         ["旧版第一页", "旧版第二页"])
+        self.assertEqual(_read_json(paddle_ocr.meta_path_for(self.txt))["version"],
+                         old_pointer["version"])
+
+    def test_crash_after_pointer_before_mirror_commits_new_version(self):
+        paddle_ocr.save_text(self.pdf, self.pages1, 2)
+        real_write = fsutil.atomic_write_text
+        def die_on_mirror(path, text, *args, **kwargs):
+            if str(path) == str(self.txt):          # 指针已提交，镜像尚未刷新
+                raise SystemExit("killed")
+            return real_write(path, text, *args, **kwargs)
+        with mock.patch.object(fsutil, "atomic_write_text", side_effect=die_on_mirror):
+            with self.assertRaises(SystemExit):
+                paddle_ocr.save_text(self.pdf, self.pages2, 2)
+        # 指针是提交点：新版本已完整可读，镜像落后但不再参与校验
+        self.assertTrue(paddle_ocr.is_complete(self.pdf, 2))
+        self.assertEqual([p["text"] for p in paddle_ocr.load_pages(self.txt)],
+                         ["新版第一页", "新版第二页"])
+        self.assertEqual(fsutil.read_text_fallback(self.txt),
+                         paddle_ocr.render_pages_text(self.pages1, page_marks=True))
+        # 下一次续跑/显式 sync 会把镜像对齐回指针，不需要重跑 OCR
+        paddle_ocr.sync_mirror(self.txt)
+        self.assertEqual(fsutil.read_text_fallback(self.txt),
+                         paddle_ocr.render_pages_text(self.pages2, page_marks=True))
+
+    def test_legacy_v1_sidecar_still_readable(self):
+        """老 `<txt> + meta` 布局不强迫重跑；下一次保存再升级到 v2。"""
+        text = paddle_ocr.render_pages_text(self.pages1, page_marks=True)
+        meta = dict(format_version=paddle_ocr.LEGACY_FORMAT_VERSION,
+                    source_sha256=fsutil.sha256_file(self.pdf),
+                    total_pages=2, completed_pages=[1, 2], complete=True,
+                    output_sha256=fsutil.sha256_text(text), chars=len(text),
+                    body_chars=sum(len(p["text"]) for p in self.pages1),
+                    page_markers=True, dpi=200, engine=None)
+        fsutil.atomic_write_text(self.txt, text)
+        fsutil.atomic_write_text(paddle_ocr.meta_path_for(self.txt),
+                                 json.dumps(meta, ensure_ascii=False))
+        self.assertTrue(paddle_ocr.is_complete(self.pdf, 2))
+        self.assertEqual([p["text"] for p in paddle_ocr.load_pages(self.txt)],
+                         ["旧版第一页", "旧版第二页"])
 
 
 @unittest.skipUnless(HAS_PYMUPDF, "需要本机安装 pymupdf")
@@ -487,7 +561,7 @@ class OcrMergeTest(unittest.TestCase):
         self.assertFalse(os.path.exists(self.md + ".ocr.bak"))
 
     def test_missing_ocr_text_raises(self):
-        os.unlink(str(paddle_ocr.text_path_for(self.pdf)))
+        os.unlink(str(paddle_ocr.active_text_path(self.pdf)))
         with self.assertRaises(ocr_merge.MergeError):
             ocr_merge.merge_file(self.pdf)
 

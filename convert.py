@@ -151,8 +151,8 @@ GATE_RANK = {"pass": 2, "review": 1, "fail": 0}
 GATE_LABEL = {"pass": "通过", "review": "待裁定", "fail": "不通过"}
 STRUCTURED_NOTE = ("正文由 PDF 结构化抽取得到，保留标题/表格/列表；配图另存 "
                    "<同名>.images/，不做广告/信息流噪声清洗。")
-PADDLE_NOTE = ("正文由页级 OCR 得到，按页顺序拼接；OCR 全文与来源指纹见 "
-               "<同名>.pdf.ocr.txt 及其 .meta.json。")
+PADDLE_NOTE = ("正文由页级 OCR 得到，按页顺序拼接；OCR 当前版本见 "
+               "<同名>.pdf.ocr.txt，版本目录与原子指针见 <同名>.pdf.ocr/ 与 .meta.json。")
 
 SLICE_STEP = 1800
 SLICE_OVERLAP = 60
