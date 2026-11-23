@@ -371,6 +371,37 @@ convert_file → 三态门禁 assess(md)
 
 ---
 
+## 八、结构后处理：章节表重排与内嵌链接复原（2026-11-23）
+
+页级 OCR（`--backend paddle`）只给扁平的「一行一行文字」，标题层级和超链接全丢。`outline.py` 补这一段：吃 OCR 全文 + 手写章节表，输出带层级、带可点击链接的 md。
+
+```powershell
+# 1) 先看计划：页数、章节定位、链接复原数，不写盘
+py -3.11 outline.py 书.pdf --text 书.pdf.ocr.txt --headings headings.tsv --drop-toc --check
+
+# 2) 真写（默认输出 <text 去扩展名>.outline.md）
+py -3.11 outline.py 书.pdf --text 书.pdf.ocr.txt --headings headings.tsv --drop-toc -o 书.md --overwrite
+```
+
+`headings.tsv` 一行一个标题，`级别<TAB>标题`，按原文顺序：
+
+```
+1	Java开源项目汇总
+2	教程
+3	Java
+3	SpringBoot
+```
+
+三个设计取舍：
+
+1. **章节靠章节表，不靠猜**。OCR 字号/行距不可靠（实测同一份 PDF 各页行数差 2–5 行，按比例对齐会错页），所以标题清单由人给一次，`place_headings()` 顺序贪心定位：行文本归一后精确相等，或标题 ≥4 字时前缀/后缀命中；定位不到记进 `缺失`，不猜位置。命中后标题用**章节表的措辞**覆盖 OCR 原文，OCR 错字就不会进标题。
+2. **链接来自 PDF 注释，不靠文本匹配猜**。`collect_links()` 读 `page.get_links()` 的 URI，按 URL 末段建索引（末段为空时退回主机名首段，`hbase.apache.org` → `hbase`）；`attach_links()` 只改写成 `N. [名称](URI)：说明` 这一种形态。名称摘要对不上就记进 `未匹配` 原样保留 —— 宁可少一条链接，也不给条目挂错地址。`lookup_link()` 允许 ±2 字符前缀差异（`MyCat` → `MyCat2`）。
+3. **目录页按符号密度丢**。`--drop-toc` 用「项目符号行占比」判目录页；目录尾（第一页被丢后剩下的几行）在首个定位标题之前、且都是短行/项目符号行时一并裁掉，行号同步回写。不想自动判就用 `--start-at "教程"` 指定起点。
+
+报告是 JSON：`页数` / `行数` / `丢弃目录页` / `丢弃目录尾` / `章节{已定位,缺失,明细}` / `链接{已复原,未匹配,明细}`。实测一份 9 页、63 条目的项目汇总：丢目录页 1 页、章节 39/39 定位、链接复原 83 条、未匹配 8 条（都是 PDF 里本就没挂链接的条目 + OCR 伪行）。
+
+---
+
 ## License
 
 MIT，见 [LICENSE](LICENSE)。欢迎提 issue / PR；改行为请先跑 `py -3.11 -m unittest`，并在 PR 里附上语料前后对比（`--log` 的 chars / gate 两列就够）。

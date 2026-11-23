@@ -48,6 +48,7 @@ Issues = "https://github.com/libai4hao/pdf2md/issues"
 pdf2md = "convert:main"
 pdf2md-batch = "batch_convert:main"
 pdf2md-merge = "ocr_merge:main"
+pdf2md-outline = "outline:main"
 
 [tool.setuptools]
 py-modules = [
@@ -58,6 +59,7 @@ py-modules = [
   "paddle_ocr",
   "quality",
   "fsutil",
+  "outline",
 ]
 
 [tool.setuptools.dynamic]
